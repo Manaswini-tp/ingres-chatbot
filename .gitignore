@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.env
+
+# Rasa
+.rasa/
+models/
+
+# NodeJS / React
+node_modules/
+build/
+.cache/
+
+# VSCode
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# TensorFlow / JAX / SciPy huge binaries
+*.dll
+*.so
+*.pyd
+*.whl
+*.tar.gz
