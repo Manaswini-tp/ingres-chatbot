@@ -1,0 +1,22 @@
+version: "3.1"
+
+stories:
+- story: greet user
+  steps:
+  - intent: greet
+  - action: utter_greet
+
+- story: say goodbye
+  steps:
+  - intent: goodbye
+  - action: utter_goodbye
+
+- story: ask about groundwater
+  steps:
+  - intent: ask_groundwater_info
+  - action: utter_default
+
+- story: ask about states
+  steps:
+  - intent: ask_state_list
+  - action: utter_default

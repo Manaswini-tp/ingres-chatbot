@@ -1,0 +1,73 @@
+version: "3.1"
+
+nlu:
+- intent: greet
+  examples: |
+    - hi
+    - hello
+    - hey
+    - good morning
+    - good evening
+    - namaste
+    - hi there
+
+- intent: goodbye
+  examples: |
+    - bye
+    - goodbye
+    - see you later
+    - talk to you later
+    - thank you bye
+    - bye bye
+
+- intent: ask_groundwater_info
+  examples: |
+    - tell me about groundwater in [Karnataka](state)
+    - groundwater data for [Maharashtra](state)
+    - what is the groundwater status in [Delhi](state)
+    - show me groundwater information for [Tamil Nadu](state)
+    - [Kerala](state) groundwater
+    - water data for [Bangalore](district)
+    - information about [Mumbai](district)
+    - [Rajasthan](state) water information
+    - tell me about [Gujarat](state)
+    - data for [Andhra Pradesh](state)
+
+- intent: ask_rainfall_data
+  examples: |
+    - what is the rainfall in [Karnataka](state)
+    - rainfall data for [Bangalore](district)
+    - tell me rainfall information for [Maharashtra](state)
+    - how much rain in [Mumbai](district)
+    - [Kerala](state) rainfall
+    - rainfall in [Tamil Nadu](state)
+
+- intent: ask_extraction_stage
+  examples: |
+    - groundwater extraction stage in [Karnataka](state)
+    - extraction level in [Bangalore](district)
+    - how much water is extracted in [Maharashtra](state)
+    - stage of groundwater extraction [Delhi](state)
+    - extraction percentage in [Punjab](state)
+
+- intent: ask_water_availability
+  examples: |
+    - water availability in [Karnataka](state)
+    - how much water is available in [Maharashtra](state)
+    - available groundwater in [Delhi](district)
+    - water resources in [Gujarat](state)
+
+- intent: ask_state_list
+  examples: |
+    - show all states
+    - list all states
+    - which states do you have data for
+    - show me all available states
+    - what states are available
+    - give me list of states
+
+- intent: compare_data
+  examples: |
+    - compare [Bangalore](district) and [Mysore](district)
+    - difference between [Karnataka](state) and [Kerala](state)
+    - compare [Maharashtra](state) with [Gujarat](state)

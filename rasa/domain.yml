@@ -1,0 +1,49 @@
+version: "3.1"
+
+intents:
+  - greet
+  - goodbye
+  - ask_groundwater_info
+  - ask_rainfall_data
+  - ask_extraction_stage
+  - ask_water_availability
+  - compare_data
+  - ask_state_list
+
+entities:
+  - state
+  - district
+  - location
+
+slots:
+  state:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: state
+  district:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: district
+  location:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: location
+
+responses:
+  utter_greet:
+  - text: "Hello! I'm your INGRES AI assistant. I can provide groundwater information for any state or district in India."
+
+  utter_goodbye:
+  - text: "Goodbye! Feel free to return anytime for groundwater data."
+
+  utter_default:
+  - text: "I can help you with groundwater data. Try asking about a specific state or district."
+
+actions: []
+
+session_config:
+  session_expiration_time: 60
+  carry_over_slots_to_new_session: true

@@ -1,0 +1,2639 @@
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\backend\app\crud.py =======
+
+from sqlalchemy.orm import Session
+from sqlalchemy import func, or_
+from . import models
+from typing import List, Optional
+
+def get_data_by_state(db: Session, state: str) -> List[models.GroundwaterData]:
+    """Get all data for a specific state"""
+    return db.query(models.GroundwaterData).filter(
+        func.upper(models.GroundwaterData.state) == state.upper()
+    ).all()
+
+def get_data_by_district(db: Session, district: str) -> List[models.GroundwaterData]:
+    """Get data for a specific district"""
+    return db.query(models.GroundwaterData).filter(
+        func.upper(models.GroundwaterData.district).contains(district.upper())
+    ).all()
+
+def search_data(db: Session, query: str) -> List[models.GroundwaterData]:
+    """Search data by state or district"""
+    search_term = f"%{query.upper()}%"
+    return db.query(models.GroundwaterData).filter(
+        or_(
+            func.upper(models.GroundwaterData.state).like(search_term),
+            func.upper(models.GroundwaterData.district).like(search_term)
+        )
+    ).limit(20).all()
+
+def get_all_states(db: Session) -> List[str]:
+    """Get list of all unique states"""
+    states = db.query(models.GroundwaterData.state).distinct().all()
+    return sorted([state[0] for state in states if state[0]])
+
+def get_districts_by_state(db: Session, state: str) -> List[str]:
+    """Get all districts in a state"""
+    districts = db.query(models.GroundwaterData.district).filter(
+        func.upper(models.GroundwaterData.state) == state.upper()
+    ).distinct().all()
+    return sorted([district[0] for district in districts if district[0]])
+
+def get_statistics(db: Session, state: Optional[str] = None):
+    """Get statistics for a state or all India"""
+    query = db.query(models.GroundwaterData)
+    if state:
+        query = query.filter(func.upper(models.GroundwaterData.state) == state.upper())
+    
+    data = query.all()
+    if not data:
+        return None
+    
+    rainfall_data = [d.rainfall_mm for d in data if d.rainfall_mm]
+    extraction_data = [d.stage_of_gw_extraction for d in data if d.stage_of_gw_extraction]
+    recharge_data = [d.ground_water_recharge for d in data if d.ground_water_recharge]
+    
+    return {
+        'total_records': len(data),
+        'avg_rainfall': sum(rainfall_data) / len(rainfall_data) if rainfall_data else 0,
+        'avg_extraction_stage': sum(extraction_data) / len(extraction_data) if extraction_data else 0,
+        'avg_recharge': sum(recharge_data) / len(recharge_data) if recharge_data else 0
+    }
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\backend\app\database.py =======
+
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ingres_user:ingres_password@localhost:5432/ingres_db")
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\backend\app\data_processor.py =======
+
+import pandas as pd
+from sqlalchemy.orm import Session
+from .models import GroundwaterData
+from .database import engine, SessionLocal
+import logging
+
+logger = logging.getLogger(__name__)
+
+def clean_numeric(value):
+    """Convert value to float, return None if not possible"""
+    try:
+        if pd.isna(value):
+            return None
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+def load_ingres_data_to_db(file_path: str = "ingres-data.xlsx"):
+    """
+    Load INGRES Excel data into PostgreSQL database with enhanced cleaning
+    """
+    try:
+        logger.info(f"Loading data from {file_path}")
+        
+        # Read Excel file
+        df = pd.read_excel(file_path, sheet_name='GEC', skiprows=7)
+        
+        # Clean data
+        df = df.dropna(subset=['STATE', 'DISTRICT'], how='all')
+        df = df[df['STATE'].notna()]
+        df = df[df['STATE'].astype(str).str.strip() != '']
+        
+        # Prepare data records
+        records = []
+        for _, row in df.iterrows():
+            try:
+                record = {
+                    's_no': str(row.get('S.No', '')),
+                    'state': str(row.get('STATE', '')).strip().upper(),
+                    'district': str(row.get('DISTRICT', '')).strip().upper(),
+                    'assessment_unit': str(row.get('ASSESSMENT UNIT', '')),
+                    'rainfall_mm': clean_numeric(row.get('Rainfall (mm)')),
+                    'total_geographical_area': clean_numeric(row.get('Total Geographical Area (ha)')),
+                    'ground_water_recharge': clean_numeric(row.get('Ground Water Recharge (ham)')),
+                    'annual_extractable_gw_resource': clean_numeric(row.get('Annual Extractable Ground water Resource (ham)')),
+                    'gw_extraction': clean_numeric(row.get('Ground Water Extraction for all uses (ha.m)')),
+                    'stage_of_gw_extraction': clean_numeric(row.get('Stage of Ground Water Extraction (%)')),
+                    'net_gw_availability': clean_numeric(row.get('Net Annual Ground Water Availability for Future Use (ham)'))
+                }
+                
+                if record['state'] and record['district']:
+                    records.append(record)
+            except Exception as e:
+                logger.warning(f"Error processing row: {e}")
+                continue
+        
+        # Load to database
+        db = SessionLocal()
+        try:
+            # Clear existing data
+            db.query(GroundwaterData).delete()
+            
+            # Insert new data
+            for record in records:
+                db_record = GroundwaterData(**record)
+                db.add(db_record)
+            
+            db.commit()
+            logger.info(f"Successfully loaded {len(records)} records into database")
+            return len(records)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Database error: {e}")
+            raise
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error loading data: {e}")
+        raise
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\backend\app\init.py =======
+
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\backend\app\main.py =======
+
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from typing import List, Optional, Dict, Any
+from . import models, schemas, crud
+from .database import engine, get_db
+from .translation import translator
+from .data_processor import load_ingres_data_to_db
+import logging
+import httpx
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="INGRES Chatbot API", version="3.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Rasa configuration
+RASA_SERVER_URL = "http://localhost:5005"
+USE_RASA = True  # Set to False to disable Rasa
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        count = load_ingres_data_to_db("ingres-data.xlsx")
+        logger.info(f"✓ Loaded {count} records from INGRES dataset")
+    except Exception as e:
+        logger.error(f"✗ Error loading data: {e}")
+    
+    # Check if Rasa is available
+    global USE_RASA
+    if USE_RASA:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                response = await client.get(f"{RASA_SERVER_URL}/status")
+                if response.status_code == 200:
+                    logger.info("✓ Rasa server is available")
+                else:
+                    logger.warning("⚠ Rasa server not responding, using pattern matching")
+                    USE_RASA = False
+        except:
+            logger.warning("⚠ Rasa server not available, using pattern matching")
+            USE_RASA = False
+
+def normalize_location_name(name: str) -> set:
+    """Generate all possible variations of a location name"""
+    name_lower = name.lower().strip()
+    variations = {name_lower}
+    
+    city_variations = {
+        'bangalore': ['bengaluru', 'bangalore', 'bangaluru', 'bengalore'],
+        'bengaluru': ['bengaluru', 'bangalore', 'bangaluru', 'bengalore'],
+        'mysore': ['mysuru', 'mysore', 'maisuru'],
+        'mysuru': ['mysuru', 'mysore', 'maisuru'],
+        'mumbai': ['bombay', 'mumbai'],
+        'chennai': ['madras', 'chennai'],
+        'kolkata': ['calcutta', 'kolkata'],
+        'thiruvananthapuram': ['trivandrum', 'thiruvananthapuram'],
+        'kochi': ['cochin', 'kochi'],
+        'vadodara': ['baroda', 'vadodara'],
+        'pune': ['poona', 'pune']
+    }
+    
+    for key, variants in city_variations.items():
+        if any(v in name_lower for v in variants):
+            variations.update(variants)
+    
+    return variations
+
+async def get_rasa_prediction(text: str) -> Optional[Dict[str, Any]]:
+    """Get intent and entities from Rasa"""
+    if not USE_RASA:
+        return None
+    
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(
+                f"{RASA_SERVER_URL}/model/parse",
+                json={"text": text}
+            )
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"Rasa prediction: intent={data.get('intent', {}).get('name')}, confidence={data.get('intent', {}).get('confidence')}")
+                return data
+    except Exception as e:
+        logger.warning(f"Rasa call failed: {e}")
+    
+    return None
+
+def extract_locations_from_text(text: str, states: List[str], district_map: Dict) -> Dict[str, List[str]]:
+    """Extract state and district names from text"""
+    found_states = []
+    found_districts = []
+    
+    text_lower = text.lower()
+    
+    # Find states
+    for state in states:
+        if state.lower() in text_lower:
+            found_states.append(state)
+    
+    # Find districts
+    for dist_key, (dist_val, state_val) in district_map.items():
+        if dist_key in text_lower:
+            if dist_val not in found_districts:
+                found_districts.append(dist_val)
+    
+    return {
+        'states': found_states,
+        'districts': found_districts
+    }
+
+@app.post("/chat", response_model=schemas.ChatResponse)
+async def chat(message: schemas.ChatMessage, db: Session = Depends(get_db)):
+    try:
+        user_message = message.message.strip()
+        user_language = message.language
+        
+        logger.info(f"{'='*60}")
+        logger.info(f"Query: '{user_message}' | Language: '{user_language}'")
+        
+        # Detect language
+        if user_language == "auto" or not user_language:
+            user_language = translator.detect_language(user_message)
+            logger.info(f"Detected language: {user_language}")
+        
+        # Translate to English
+        english_message = user_message.lower()
+        if user_language != 'en':
+            try:
+                english_message = translator.translate_text(user_message, 'en', user_language).lower()
+                logger.info(f"Translated: '{english_message}'")
+            except Exception as e:
+                logger.error(f"Translation error: {e}")
+                english_message = user_message.lower()
+        
+        # Get Rasa prediction
+        rasa_data = await get_rasa_prediction(english_message)
+        rasa_intent = None
+        rasa_confidence = 0.0
+        rasa_entities = []
+        
+        if rasa_data:
+            rasa_intent = rasa_data.get('intent', {}).get('name')
+            rasa_confidence = rasa_data.get('intent', {}).get('confidence', 0.0)
+            rasa_entities = rasa_data.get('entities', [])
+            logger.info(f"Rasa: intent={rasa_intent} (conf={rasa_confidence:.2f}), entities={rasa_entities}")
+        
+        # Build location maps
+        states = crud.get_all_states(db)
+        all_data = db.query(models.GroundwaterData).all()
+        
+        district_map = {}
+        state_map = {}
+        
+        for data in all_data:
+            if data.district:
+                district_variations = normalize_location_name(data.district)
+                for variant in district_variations:
+                    district_map[variant] = (data.district, data.state)
+            
+            if data.state:
+                state_lower = data.state.lower()
+                state_map[state_lower] = data.state
+        
+        bot_response = ""
+        data_results = []
+        suggestions = []
+        chart_data = None
+        
+        search_text = f"{user_message.lower()} {english_message}"
+        
+        # Extract locations from text and Rasa entities
+        locations = extract_locations_from_text(search_text, states, district_map)
+        
+        # Add Rasa entities
+        for entity in rasa_entities:
+            entity_value = entity.get('value', '').lower()
+            entity_type = entity.get('entity', '')
+            
+            if entity_type in ['state', 'location']:
+                for state in states:
+                    if state.lower() in entity_value or entity_value in state.lower():
+                        if state not in locations['states']:
+                            locations['states'].append(state)
+            
+            if entity_type in ['district', 'location']:
+                for dist_key, (dist_val, state_val) in district_map.items():
+                    if dist_key in entity_value or entity_value in dist_key:
+                        if dist_val not in locations['districts']:
+                            locations['districts'].append(dist_val)
+        
+        logger.info(f"Extracted locations: {locations}")
+        
+        # Intent-based routing (Rasa or pattern matching)
+        final_intent = None
+        
+        if rasa_intent and rasa_confidence > 0.6:
+            final_intent = rasa_intent
+            logger.info(f"Using Rasa intent: {final_intent}")
+        else:
+            # Fallback to pattern matching
+            patterns = {
+                'greet': ['hello', 'hi', 'hey', 'namaste', 'ನಮಸ್ಕಾರ', 'नमस्ते'],
+                'ask_state_list': ['show states', 'list states', 'all states', 'ರಾಜ್ಯಗಳು'],
+                'compare_data': ['compare', 'vs', 'versus', 'difference'],
+                'ask_rainfall_data': ['rainfall', 'rain', 'ಮಳೆ', 'वर्षा'],
+                'ask_extraction_stage': ['extraction', 'stage', 'निष्कर्षण'],
+                'ask_groundwater_info': ['water', 'groundwater', 'ನೀರು', 'data', 'info']
+            }
+            
+            for intent, keywords in patterns.items():
+                if any(kw in search_text for kw in keywords):
+                    final_intent = intent
+                    logger.info(f"Pattern matched intent: {final_intent}")
+                    break
+        
+        # Handle intents
+        if final_intent == 'greet':
+            bot_response = "Hello! I'm your INGRES AI assistant. I can provide groundwater data for any state or district in India. Try: 'Bangalore' or 'Karnataka rainfall'"
+            suggestions = ['Karnataka', 'Maharashtra', 'Bangalore', 'Mysore', 'Show all states']
+        
+        elif final_intent == 'ask_state_list':
+            bot_response = f"I have groundwater data for {len(states)} states across India."
+            suggestions = sorted(states[:20])
+        
+        elif final_intent == 'compare_data':
+            entities_to_compare = locations['states'] + locations['districts']
+            
+            if len(entities_to_compare) >= 2:
+                comparison_data = []
+                
+                for entity in entities_to_compare[:3]:
+                    if entity in states:
+                        stats = crud.get_statistics(db, entity)
+                        if stats:
+                            comparison_data.append({
+                                'name': entity,
+                                'type': 'State',
+                                'rainfall': stats['avg_rainfall'],
+                                'extraction': stats['avg_extraction_stage']
+                            })
+                    else:
+                        data = crud.get_data_by_district(db, entity)
+                        if data:
+                            d = data[0]
+                            comparison_data.append({
+                                'name': d.district,
+                                'type': 'District',
+                                'rainfall': d.rainfall_mm or 0,
+                                'extraction': d.stage_of_gw_extraction or 0,
+                                'state': d.state
+                            })
+                
+                if comparison_data:
+                    bot_response = "Here's the comparison of groundwater data:"
+                    chart_data = {'type': 'comparison', 'data': comparison_data}
+                else:
+                    bot_response = "I found the locations but couldn't retrieve data."
+            else:
+                bot_response = "Please specify at least two locations to compare."
+        
+        elif final_intent == 'ask_rainfall_data':
+            matched_location = None
+            location_type = None
+            
+            if locations['districts']:
+                matched_location = locations['districts'][0]
+                location_type = 'district'
+            elif locations['states']:
+                matched_location = locations['states'][0]
+                location_type = 'state'
+            
+            if matched_location:
+                if location_type == 'state':
+                    data_results = crud.get_data_by_state(db, matched_location)
+                    stats = crud.get_statistics(db, matched_location)
+                    if stats:
+                        bot_response = f"Rainfall data for {matched_location}: Average rainfall is {stats['avg_rainfall']:.2f}mm across {stats['total_records']} districts."
+                        chart_data = {
+                            'type': 'rainfall',
+                            'data': [{'district': d.district, 'rainfall': d.rainfall_mm} for d in data_results[:10] if d.rainfall_mm]
+                        }
+                else:
+                    data_results = crud.get_data_by_district(db, matched_location)
+                    if data_results:
+                        d = data_results[0]
+                        bot_response = f"Rainfall in {d.district}: {d.rainfall_mm:.2f}mm"
+            else:
+                bot_response = "Please specify a location for rainfall data."
+        
+        elif final_intent == 'ask_extraction_stage':
+            matched_location = None
+            location_type = None
+            
+            if locations['districts']:
+                matched_location = locations['districts'][0]
+                location_type = 'district'
+            elif locations['states']:
+                matched_location = locations['states'][0]
+                location_type = 'state'
+            
+            if matched_location:
+                if location_type == 'state':
+                    data_results = crud.get_data_by_state(db, matched_location)
+                    stats = crud.get_statistics(db, matched_location)
+                    if stats:
+                        bot_response = f"Groundwater extraction in {matched_location}: Average extraction stage is {stats['avg_extraction_stage']:.2f}%"
+                        chart_data = {
+                            'type': 'extraction',
+                            'data': [{'district': d.district, 'extraction': d.stage_of_gw_extraction} for d in data_results[:10] if d.stage_of_gw_extraction]
+                        }
+                else:
+                    data_results = crud.get_data_by_district(db, matched_location)
+                    if data_results:
+                        d = data_results[0]
+                        bot_response = f"Extraction stage in {d.district}: {d.stage_of_gw_extraction:.2f}%"
+            else:
+                bot_response = "Please specify a location."
+        
+        else:  # ask_groundwater_info or default
+            if locations['districts']:
+                matched_district = locations['districts'][0]
+                data_results = crud.get_data_by_district(db, matched_district)
+                
+                if data_results:
+                    d = data_results[0]
+                    bot_response = f"Groundwater data for {matched_district} in {d.state}:"
+                    details = []
+                    if d.rainfall_mm:
+                        details.append(f"Rainfall: {d.rainfall_mm:.2f}mm")
+                    if d.stage_of_gw_extraction:
+                        details.append(f"Extraction: {d.stage_of_gw_extraction:.2f}%")
+                    if d.ground_water_recharge:
+                        details.append(f"GW Recharge: {d.ground_water_recharge:.2f} ham")
+                    if d.net_gw_availability:
+                        details.append(f"Net Availability: {d.net_gw_availability:.2f} ham")
+                    
+                    if details:
+                        bot_response += " " + ", ".join(details)
+                    
+                    districts_in_state = crud.get_districts_by_state(db, d.state)
+                    suggestions = [dist for dist in districts_in_state if dist != matched_district][:8]
+            
+            elif locations['states']:
+                matched_state = locations['states'][0]
+                data_results = crud.get_data_by_state(db, matched_state)
+                stats = crud.get_statistics(db, matched_state)
+                
+                if stats:
+                    bot_response = f"Groundwater data for {matched_state}: Average rainfall: {stats['avg_rainfall']:.2f}mm, Average extraction: {stats['avg_extraction_stage']:.2f}%, Total districts: {stats['total_records']}"
+                    
+                    chart_data = {
+                        'type': 'state_overview',
+                        'data': [
+                            {'name': 'Rainfall (mm)', 'value': stats['avg_rainfall']},
+                            {'name': 'Extraction (%)', 'value': stats['avg_extraction_stage']}
+                        ]
+                    }
+                    
+                    districts = crud.get_districts_by_state(db, matched_state)
+                    suggestions = districts[:12]
+            
+            else:
+                bot_response = "I couldn't find that location. Try: 'Bangalore', 'Mysore', or 'Karnataka'"
+                suggestions = ['Karnataka', 'Maharashtra', 'Bangalore', 'Mysore', 'Mumbai']
+        
+        logger.info(f"Response: {bot_response[:100]}...")
+        
+        # Translate back
+        if user_language != 'en' and bot_response:
+            try:
+                bot_response = translator.translate_text(bot_response, user_language, 'en')
+            except:
+                pass
+        
+        # Format data
+        formatted_data = []
+        for d in data_results[:15]:
+            formatted_data.append({
+                "state": d.state,
+                "district": d.district,
+                "rainfall": round(d.rainfall_mm, 2) if d.rainfall_mm else None,
+                "extraction_stage": round(d.stage_of_gw_extraction, 2) if d.stage_of_gw_extraction else None,
+                "gw_recharge": round(d.ground_water_recharge, 2) if d.ground_water_recharge else None,
+                "net_availability": round(d.net_gw_availability, 2) if d.net_gw_availability else None
+            })
+        
+        return schemas.ChatResponse(
+            response=bot_response,
+            data=formatted_data if formatted_data else None,
+            suggestions=suggestions if suggestions else None,
+            chart_data=chart_data
+        )
+    
+    except Exception as e:
+        logger.error(f"Chat error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/states", response_model=List[str])
+def get_states(db: Session = Depends(get_db)):
+    return crud.get_all_states(db)
+
+@app.get("/districts/{state}", response_model=List[str])
+def get_districts(state: str, db: Session = Depends(get_db)):
+    return crud.get_districts_by_state(db, state)
+
+@app.get("/data/{state}")
+def get_state_data(state: str, db: Session = Depends(get_db)):
+    data = crud.get_data_by_state(db, state)
+    return [schemas.GroundwaterDataSchema.from_orm(d) for d in data]
+
+@app.get("/stats/{state}")
+def get_state_stats(state: str, db: Session = Depends(get_db)):
+    stats = crud.get_statistics(db, state)
+    if not stats:
+        raise HTTPException(status_code=404, detail="State not found")
+    return stats
+
+@app.get("/stats/total")
+def get_total_stats(db: Session = Depends(get_db)):
+    total_records = db.query(models.GroundwaterData).count()
+    total_states = db.query(models.GroundwaterData.state).distinct().count()
+    total_districts = db.query(models.GroundwaterData.district).distinct().count()
+    return {
+        "total_records": total_records,
+        "total_states": total_states,
+        "total_districts": total_districts,
+        "rasa_enabled": USE_RASA
+    }
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "rasa_enabled": USE_RASA,
+        "translation": "deep-translator"
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\backend\app\models.py =======
+
+from sqlalchemy import Column, Integer, String, Float, Text, DateTime
+from datetime import datetime
+from .database import Base
+
+class GroundwaterData(Base):
+    __tablename__ = "groundwater_data"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    s_no = Column(String, index=True)
+    state = Column(String, index=True)
+    district = Column(String, index=True)
+    assessment_unit = Column(String)
+    rainfall_mm = Column(Float)
+    total_geographical_area = Column(Float)
+    ground_water_recharge = Column(Float)
+    annual_extractable_gw_resource = Column(Float)
+    gw_extraction = Column(Float)
+    stage_of_gw_extraction = Column(Float)
+    net_gw_availability = Column(Float)
+    
+class ChatHistory(Base):
+    __tablename__ = "chat_history"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_message = Column(Text)
+    bot_response = Column(Text)
+    language = Column(String, default="en")
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\backend\app\schemas.py =======
+
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+
+class GroundwaterDataSchema(BaseModel):
+    state: str
+    district: str
+    rainfall_mm: Optional[float] = None
+    ground_water_recharge: Optional[float] = None
+    gw_extraction: Optional[float] = None
+    stage_of_gw_extraction: Optional[float] = None
+    net_gw_availability: Optional[float] = None
+    
+    class Config:
+        from_attributes = True
+
+class ChatMessage(BaseModel):
+    message: str
+    language: str = "en"
+
+class ChatResponse(BaseModel):
+    response: str
+    data: Optional[List[dict]] = None
+    suggestions: Optional[List[str]] = None
+    chart_data: Optional[Dict[str, Any]] = None  # Added for charts
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\backend\app\translation.py =======
+
+from deep_translator import GoogleTranslator
+import logging
+
+logger = logging.getLogger(__name__)
+
+class TranslationService:
+    def __init__(self):
+        self.supported_languages = {
+            'en': 'English',
+            'hi': 'Hindi', 
+            'kn': 'Kannada',
+            'te': 'Telugu',
+            'ta': 'Tamil',
+            'mr': 'Marathi',
+            'bn': 'Bengali',
+            'gu': 'Gujarati',
+            'ml': 'Malayalam',
+            'pa': 'Punjabi'
+        }
+        
+        # ULTRA-COMPREHENSIVE keyword mapping - ALL STATES & DISTRICTS IN ALL LANGUAGES
+        self.keyword_map = {
+            
+            # ==================== KARNATAKA DISTRICTS (ALL LANGUAGES) ====================
+            # Bangalore / Bengaluru
+            'ಬೆಂಗಳೂರು': 'bangalore', 'बेंगलुरु': 'bangalore', 'பெங்களூரு': 'bangalore',
+            'బెంగళూరు': 'bangalore', 'ബെംഗളൂരു': 'bangalore', 'बेंगलुरू': 'bangalore',
+            'বেঙ্গালুরু': 'bangalore', 'બેંગલોર': 'bangalore', 'ਬੰਗਲੌਰ': 'bangalore',
+            'bengaluru': 'bangalore', 'bangaluru': 'bangalore',
+            
+            # Mysore / Mysuru
+            'ಮೈಸೂರು': 'mysore', 'मैसूर': 'mysore', 'மைசூர்': 'mysore',
+            'మైసూరు': 'mysore', 'മൈസൂര്': 'mysore', 'मैसूर': 'mysore',
+            'ময়সুর': 'mysore', 'મૈસૂર': 'mysore', 'ਮੈਸੂਰ': 'mysore',
+            'mysuru': 'mysore', 'maisuru': 'mysore',
+            
+            # Hubli / Hubballi
+            'ಹುಬ್ಬಳ್ಳಿ': 'hubli', 'हुबली': 'hubli', 'ஹூபளி': 'hubli',
+            'హుబ్లీ': 'hubli', 'ഹബ്ലി': 'hubli', 'हुबळी': 'hubli',
+            'হুবলি': 'hubli', 'હુબલી': 'hubli', 'ਹੁਬਲੀ': 'hubli',
+            'hubballi': 'hubli', 'dharwad hubli': 'hubli',
+            
+            # Mangalore / Mangaluru
+            'ಮಂಗಳೂರು': 'mangalore', 'मैंगलोर': 'mangalore', 'மங்களூர்': 'mangalore',
+            'మంగళూరు': 'mangalore', 'മംഗലൂര്': 'mangalore', 'मंगळूर': 'mangalore',
+            'মাঙ্গালোর': 'mangalore', 'મંગલોર': 'mangalore', 'ਮੰਗਲੌਰ': 'mangalore',
+            'mangaluru': 'mangalore', 'mangaloor': 'mangalore',
+            
+            # Belgaum / Belagavi
+            'ಬೆಳಗಾವಿ': 'belgaum', 'बेलगाम': 'belgaum', 'பெலகாம்': 'belgaum',
+            'బెలగావి': 'belgaum', 'ബെലഗാവി': 'belgaum', 'बेळगांव': 'belgaum',
+            'বেলগাঁও': 'belgaum', 'બેલગામ': 'belgaum', 'ਬੇਲਗਾਂਵ': 'belgaum',
+            'belagavi': 'belgaum', 'belgavi': 'belgaum',
+            
+            # Gulbarga / Kalaburagi
+            'ಕಲಬುರಗಿ': 'gulbarga', 'गुलबर्गा': 'gulbarga', 'குல்பர்கா': 'gulbarga',
+            'గుల్బర్గా': 'gulbarga', 'ഗുൽബർഗ': 'gulbarga', 'गुलबर्गा': 'gulbarga',
+            'গুলবর্গা': 'gulbarga', 'ગુલબર્ગા': 'gulbarga', 'ਗੁਲਬਰਗਾ': 'gulbarga',
+            'kalaburagi': 'gulbarga', 'kalburgi': 'gulbarga',
+            
+            # Davangere
+            'ದಾವಣಗೆರೆ': 'davangere', 'दावणगेरे': 'davangere', 'தாவங்கெரே': 'davangere',
+            'దావణగెరే': 'davangere', 'ദാവങ്ങെരെ': 'davangere', 'दावणगेरे': 'davangere',
+            'দাবনগিরি': 'davangere', 'દાવણગેરે': 'davangere', 'ਦਾਵਣਗੇਰੇ': 'davangere',
+            
+            # Ballari / Bellary
+            'ಬಲ್ಲಾರಿ': 'bellary', 'बल्लारी': 'bellary', 'பல்லாரி': 'bellary',
+            'బల్లారి': 'bellary', 'ബല്ലാരി': 'bellary', 'बल्लारी': 'bellary',
+            'বেল্লারি': 'bellary', 'બલ્લારી': 'bellary', 'ਬੱਲਾਰੀ': 'bellary',
+            'ballari': 'bellary', 'belari': 'bellary',
+            
+            # Bijapur / Vijayapura
+            'ಬೀಜಾಪುರ': 'bijapur', 'बीजापुर': 'bijapur', 'பீஜாபூர்': 'bijapur',
+            'బిజాపూర్': 'bijapur', 'ബീജാപൂര്': 'bijapur', 'बीजापूर': 'bijapur',
+            'বিজাপুর': 'bijapur', 'બીજાપુર': 'bijapur', 'ਬੀਜਾਪੁਰ': 'bijapur',
+            'vijayapura': 'bijapur', 'vijayapur': 'bijapur',
+            
+            # Shimoga / Shivamogga
+            'ಶಿವಮೊಗ್ಗ': 'shimoga', 'शिवमोग्गा': 'shimoga', 'சிவமொக்கா': 'shimoga',
+            'శివమొగ్గ': 'shimoga', 'ശിവമോഗ്ഗ': 'shimoga', 'शिवमोग्गा': 'shimoga',
+            'শিবমোগা': 'shimoga', 'શિવમોગા': 'shimoga', 'ਸ਼ਿਵਮੋਗਾ': 'shimoga',
+            'shimogga': 'shimoga', 'shivamogga': 'shimoga',
+            
+            # Tumkur / Tumakuru
+            'ತುಮಕೂರು': 'tumkur', 'तुमकुरु': 'tumkur', 'துமகூரு': 'tumkur',
+            'తుమకూరు': 'tumkur', 'തുമകൂരു': 'tumkur', 'तुमकुरू': 'tumkur',
+            'তুমকুর': 'tumkur', 'તુમકુર': 'tumkur', 'ਤੁਮਕੁਰ': 'tumkur',
+            'tumakuru': 'tumkur', 'tumkoor': 'tumkur',
+            
+            # Raichur
+            'ರಾಯಚೂರು': 'raichur', 'रायचूर': 'raichur', 'ராய்சூர்': 'raichur',
+            'రాయచూరు': 'raichur', 'റായ്ചൂര്': 'raichur', 'रायचूर': 'raichur',
+            'রায়চুর': 'raichur', 'રાયચુર': 'raichur', 'ਰਾਇਚੁਰ': 'raichur',
+            
+            # Bidar
+            'ಬೀದರ್': 'bidar', 'बीदर': 'bidar', 'பீதர்': 'bidar',
+            'బీదర్': 'bidar', 'ബീദർ': 'bidar', 'बीदर': 'bidar',
+            'বিদার': 'bidar', 'બીદર': 'bidar', 'ਬੀਦਰ': 'bidar',
+            
+            # Hassan
+            'ಹಾಸನ': 'hassan', 'हासन': 'hassan', 'ஹாசன்': 'hassan',
+            'హాసన్': 'hassan', 'ഹാസന്': 'hassan', 'हासन': 'hassan',
+            'হাসান': 'hassan', 'હાસન': 'hassan', 'ਹਾਸਨ': 'hassan',
+            
+            # Gadag
+            'ಗದಗ': 'gadag', 'गदग': 'gadag', 'கதக்': 'gadag',
+            'గదగ్': 'gadag', 'ഗദഗ്': 'gadag', 'गदग': 'gadag',
+            'গদগ': 'gadag', 'ગદગ': 'gadag', 'ਗਦਗ': 'gadag',
+            
+            # Mandya
+            'ಮಾಂಡ್ಯ': 'mandya', 'मांड्या': 'mandya', 'மாண்ட்யா': 'mandya',
+            'మాండ్యా': 'mandya', 'മാണ്ഡ്യ': 'mandya', 'मांड्या': 'mandya',
+            'মান্ড্যা': 'mandya', 'માંડ્યા': 'mandya', 'ਮਾਂਡਿਆ': 'mandya',
+            
+            # Udupi
+            'ಉಡುಪಿ': 'udupi', 'उडुपी': 'udupi', 'உடுப்பி': 'udupi',
+            'ఉడుపి': 'udupi', 'ഉഡുപി': 'udupi', 'उडुपी': 'udupi',
+            'উদুপি': 'udupi', 'ઉડુપી': 'udupi', 'ਉਡੁਪੀ': 'udupi',
+            
+            # Chikmagalur / Chikkamagaluru
+            'ಚಿಕ್ಕಮಗಳೂರು': 'chikmagalur', 'चिकमगलूर': 'chikmagalur', 'சிக்மகலூர்': 'chikmagalur',
+            'చిక్మగళూరు': 'chikmagalur', 'ചിക്മഗളൂര്': 'chikmagalur', 'चिकमगलूर': 'chikmagalur',
+            'চিকমাগালুর': 'chikmagalur', 'ચિકમગલુર': 'chikmagalur', 'ਚਿਕਮਾਗਲੂਰ': 'chikmagalur',
+            'chikkamagaluru': 'chikmagalur', 'chickmagalur': 'chikmagalur',
+            
+            # Kodagu / Coorg
+            'ಕೊಡಗು': 'kodagu', 'कोडागु': 'kodagu', 'கோடகு': 'kodagu',
+            'కోడగు': 'kodagu', 'കോഡഗു': 'kodagu', 'कोडागु': 'kodagu',
+            'কোদাগু': 'kodagu', 'કોડાગુ': 'kodagu', 'ਕੋਡਾਗੂ': 'kodagu',
+            'coorg': 'kodagu',
+            
+            # Dharwad
+            'ಧಾರವಾಡ': 'dharwad', 'धारवाड़': 'dharwad', 'தார்வாட்': 'dharwad',
+            'ధార్వాడ్': 'dharwad', 'ധര്‍വാഡ്': 'dharwad', 'धारवाड': 'dharwad',
+            'ধারওয়াড': 'dharwad', 'ધારવાડ': 'dharwad', 'ਧਾਰਵਾੜ': 'dharwad',
+            'dharwar': 'dharwad',
+            
+            # Bagalkot
+            'ಬಾಗಲಕೋಟೆ': 'bagalkot', 'बागलकोट': 'bagalkot', 'பாகல்கோட்': 'bagalkot',
+            'బాగల్‌కోట్': 'bagalkot', 'ബാഗല്‍കോട്ട്': 'bagalkot', 'बागलकोट': 'bagalkot',
+            'বাগালকোট': 'bagalkot', 'બાગલકોટ': 'bagalkot', 'ਬਾਗਲਕੋਟ': 'bagalkot',
+            
+            # Haveri
+            'ಹಾವೇರಿ': 'haveri', 'हावेरी': 'haveri', 'ஹவேரி': 'haveri',
+            'హావేరి': 'haveri', 'ഹവേരി': 'haveri', 'हावेरी': 'haveri',
+            'হাভেরি': 'haveri', 'હવેરી': 'haveri', 'ਹਾਵੇਰੀ': 'haveri',
+            
+            # Chitradurga
+            'ಚಿತ್ರದುರ್ಗ': 'chitradurga', 'चित्रदुर्गा': 'chitradurga', 'சித்திரதுர்கா': 'chitradurga',
+            'చిత్రదుర్గ': 'chitradurga', 'ചിത്രദുര്‍ഗ': 'chitradurga', 'चित्रदुर्ग': 'chitradurga',
+            'চিত্রদুর্গ': 'chitradurga', 'ચિત્રદુર્ગ': 'chitradurga', 'ਚਿਤਰਦੁਰਗ': 'chitradurga',
+            
+            # Koppal
+            'ಕೊಪ್ಪಳ': 'koppal', 'कोप्पल': 'koppal', 'கொப்பல்': 'koppal',
+            'కొప్పల్': 'koppal', 'കൊപ്പല്': 'koppal', 'कोप्पल': 'koppal',
+            'কোপ্পাল': 'koppal', 'કોપ્પલ': 'koppal', 'ਕੋਪਾਲ': 'koppal',
+            
+            # Uttara Kannada
+            'ಉತ್ತರ ಕನ್ನಡ': 'uttara kannada', 'उत्तर कन्नड़': 'uttara kannada', 'உத்தர கன்னட': 'uttara kannada',
+            'ఉత్తర కన్నడ': 'uttara kannada', 'ഉത്തര കന്നഡ': 'uttara kannada',
+            'karwar': 'uttara kannada', 'कारवार': 'uttara kannada',
+            
+            # Dakshina Kannada
+            'ದಕ್ಷಿಣ ಕನ್ನಡ': 'dakshina kannada', 'दक्षिण कन्नड़': 'dakshina kannada',
+            'தக்ஷிண கன்னட': 'dakshina kannada', 'దక్షిణ కన్నడ': 'dakshina kannada',
+            
+            # Chamarajanagar
+            'ಚಾಮರಾಜನಗರ': 'chamarajanagar', 'चामराजनगर': 'chamarajanagar',
+            'சாமராஜநகர்': 'chamarajanagar', 'చామరాజనగర్': 'chamarajanagar',
+            
+            # Chikkaballapur
+            'ಚಿಕ್ಕಬಳ್ಳಾಪುರ': 'chikkaballapur', 'चिक्कबल्लापुर': 'chikkaballapur',
+            
+            # Kolar
+            'ಕೋಲಾರ': 'kolar', 'कोलार': 'kolar', 'கோலார்': 'kolar',
+            'కోలార్': 'kolar', 'കോലാര്': 'kolar',
+            
+            # Ramanagara
+            'ರಾಮನಗರ': 'ramanagara', 'रामनगर': 'ramanagara', 'ராமநகர்': 'ramanagara',
+            
+            # Yadgir
+            'ಯಾದಗಿರಿ': 'yadgir', 'यादगीर': 'yadgir', 'யாத்கீர்': 'yadgir',
+            
+            
+            # ==================== MAHARASHTRA DISTRICTS ====================
+            # Mumbai
+            'मुंबई': 'mumbai', 'ముంబై': 'mumbai', 'மும்பை': 'mumbai',
+            'ಮುಂಬೈ': 'mumbai', 'മുംബൈ': 'mumbai', 'মুম্বাই': 'mumbai',
+            'મુંબઈ': 'mumbai', 'ਮੁੰਬਈ': 'mumbai', 'bombay': 'mumbai',
+            
+            # Pune
+            'पुणे': 'pune', 'పూణే': 'pune', 'புணே': 'pune',
+            'ಪುಣೆ': 'pune', 'പൂണേ': 'pune', 'পুনে': 'pune',
+            'પૂણે': 'pune', 'ਪੁਣੇ': 'pune', 'poona': 'pune',
+            
+            # Nagpur
+            'नागपुर': 'nagpur', 'నాగ్‌పూర్': 'nagpur', 'நாக்பூர்': 'nagpur',
+            'ನಾಗಪುರ': 'nagpur', 'നാഗ്പൂര്': 'nagpur', 'নাগপুর': 'nagpur',
+            'નાગપુર': 'nagpur', 'ਨਾਗਪੁਰ': 'nagpur',
+            
+            # Thane
+            'ठाणे': 'thane', 'తానే': 'thane', 'தானே': 'thane',
+            'ಠಾಣೆ': 'thane', 'ടാനെ': 'thane', 'ঠাণে': 'thane',
+            
+            # Nashik
+            'नाशिक': 'nashik', 'నాసిక్': 'nashik', 'நாசிக்': 'nashik',
+            'ನಾಶಿಕ್': 'nashik', 'നാസിക്': 'nashik',
+            
+            # Aurangabad
+            'औरंगाबाद': 'aurangabad', 'ఔరంగాబాద్': 'aurangabad', 'ஔரங்காபாத்': 'aurangabad',
+            'ಔರಂಗಾಬಾದ್': 'aurangabad', 'ഔരംഗാബാദ്': 'aurangabad',
+            
+            # Solapur
+            'सोलापुर': 'solapur', 'సోలాపూర్': 'solapur', 'சோலாப்பூர்': 'solapur',
+            
+            # Kolhapur
+            'कोल्हापुर': 'kolhapur', 'కోల్‌హాపూర్': 'kolhapur', 'கோல்ஹாப்பூர்': 'kolhapur',
+            
+            # Ahmednagar
+            'अहमदनगर': 'ahmednagar', 'అహ్మద్‌నగర్': 'ahmednagar',
+            
+            # Satara
+            'सातारा': 'satara', 'సతార': 'satara',
+            
+            # Sangli
+            'सांगली': 'sangli', 'సాంగ్లీ': 'sangli',
+            
+            # Jalgaon
+            'जळगांव': 'jalgaon', 'జల్గావ్': 'jalgaon',
+            
+            # Akola
+            'अकोला': 'akola', 'అకోలా': 'akola',
+            
+            # Amravati
+            'अमरावती': 'amravati', 'అమరావతి': 'amravati',
+            
+            # Ratnagiri
+            'रत्नागिरी': 'ratnagiri', 'రత్నగిరి': 'ratnagiri',
+            
+            
+            # ==================== TAMIL NADU DISTRICTS ====================
+            # Chennai
+            'சென்னை': 'chennai', 'चेन्नई': 'chennai', 'చెన్నై': 'chennai',
+            'ಚೆನ್ನೈ': 'chennai', 'ചെന്നൈ': 'chennai', 'চেন্নাই': 'chennai',
+            'ચેન્નઈ': 'chennai', 'ਚੇਨਈ': 'chennai', 'madras': 'chennai',
+            
+            # Coimbatore
+            'கோயம்புத்தூர்': 'coimbatore', 'कोयम्बटूर': 'coimbatore', 'కోయంబత్తూరు': 'coimbatore',
+            'ಕೋಯಮತ್ತೂರ': 'coimbatore', 'കോയമ്പത്തൂര്': 'coimbatore',
+            
+            # Madurai
+            'மதுரை': 'madurai', 'मदुरै': 'madurai', 'మదురై': 'madurai',
+            'ಮಧುರೈ': 'madurai', 'മദുര': 'madurai',
+            
+            # Tiruchirappalli / Trichy
+            'திருச்சிராப்பள்ளி': 'trichy', 'तिरुचिरापल्ली': 'trichy', 'తిరుచ్చిరాప్పల్లి': 'trichy',
+            'tiruchirappalli': 'trichy',
+            
+            # Salem
+            'சேலம்': 'salem', 'सलेम': 'salem', 'సేలం': 'salem',
+            'ಸೇಲಂ': 'salem', 'സേലം': 'salem',
+            
+            # Tirunelveli
+            'திருநெல்வேலி': 'tirunelveli', 'तिरुनेलवेली': 'tirunelveli',
+            
+            # Tiruppur
+            'திருப்பூர்': 'tiruppur', 'तिरुप्पूर': 'tiruppur',
+            
+            # Vellore
+            'வேலூர்': 'vellore', 'वेल्लोर': 'vellore', 'వెల్లూరు': 'vellore',
+            
+            # Erode
+            'ஈரோடு': 'erode', 'इरोड': 'erode',
+            
+            # Thanjavur
+            'தஞ்சாவூர்': 'thanjavur', 'तंजावुर': 'thanjavur',
+            
+            # Kanyakumari
+            'கன்னியாகுமரி': 'kanyakumari', 'कन्याकुमारी': 'kanyakumari',
+            
+            
+            # ==================== ANDHRA PRADESH & TELANGANA DISTRICTS ====================
+            # Hyderabad
+            'హైదరాబాద్': 'hyderabad', 'हैदराबाद': 'hyderabad', 'ஹைதராபாத்': 'hyderabad',
+            'ಹೈದರಾಬಾದ್': 'hyderabad', 'ഹൈദരാബാദ്': 'hyderabad', 'হায়দরাবাদ': 'hyderabad',
+            'હૈદરાબાદ': 'hyderabad', 'ਹੈਦਰਾਬਾਦ': 'hyderabad',
+            
+            # Visakhapatnam
+            'విశాఖపట్నం': 'visakhapatnam', 'विशाखापत्तनम': 'visakhapatnam', 'விசாகப்பட்டினம்': 'visakhapatnam',
+            'ವಿಶಾಖಪಟ್ಟಣಂ': 'visakhapatnam', 'വിശാഖപട്ടണം': 'visakhapatnam',
+            'vizag': 'visakhapatnam', 'vishakhapatnam': 'visakhapatnam',
+            
+            # Vijayawada
+            'విజయవాడ': 'vijayawada', 'विजयवाड़ा': 'vijayawada', 'விஜயவாடா': 'vijayawada',
+            'ವಿಜಯವಾಡ': 'vijayawada',
+            
+            # Guntur
+            'గుంటూరు': 'guntur', 'गुंटूर': 'guntur', 'குந்தூர்': 'guntur',
+            
+            # Warangal
+            'వరంగల్': 'warangal', 'वारंगल': 'warangal',
+            
+            # Nellore
+            'నెల్లూరు': 'nellore', 'नेल्लूर': 'nellore',
+            
+            # Tirupati
+            'తిరుపతి': 'tirupati', 'तिरुपति': 'tirupati', 'திருப்பதி': 'tirupati',
+            
+            # Karimnagar
+            'కరీంనగర్': 'karimnagar', 'करीमनगर': 'karimnagar',
+            
+            
+            # ==================== KERALA DISTRICTS ====================
+            # Thiruvananthapuram / Trivandrum
+            'തിരുവനന്തപുരം': 'thiruvananthapuram', 'तिरुवनंतपुरम': 'thiruvananthapuram',
+            'திருவனந்தபுரம்': 'thiruvananthapuram', 'తిరువనంతపురం': 'thiruvananthapuram',
+            'trivandrum': 'thiruvananthapuram',
+            
+            # Kochi / Cochin
+            'കൊച്ചി': 'kochi', 'कोच्चि': 'kochi', 'கொச்சி': 'kochi',
+            'కొచ్చి': 'kochi', 'ಕೊಚ್ಚಿ': 'kochi', 'cochin': 'kochi',
+            
+            # Kozhikode / Calicut
+            'കോഴിക്കോട്': 'kozhikode', 'कोझिकोड': 'kozhikode', 'கோழிக்கோடு': 'kozhikode',
+            'calicut': 'kozhikode',
+            
+            # Kollam
+            'കൊല്ലം': 'kollam', 'कोल्लम': 'kollam', 'கொல்லம்': 'kollam',
+            
+            # Thrissur
+            'തൃശ്ശൂര്': 'thrissur', 'त्रिशूर': 'thrissur',
+            
+            # Kannur
+            'കണ്ണൂര്': 'kannur', 'कण्णूर': 'kannur',
+            
+            # Alappuzha
+            'ആലപ്പുഴ': 'alappuzha', 'आलप्पुझा': 'alappuzha', 'alleppey': 'alappuzha',
+            
+            # Palakkad
+            'പാലക്കാട്': 'palakkad', 'पालक्काड': 'palakkad',
+            
+            # Malappuram
+            'മലപ്പുറം': 'malappuram', 'मलप्पुरम': 'malappuram',
+            
+            # Kottayam
+            'കോട്ടയം': 'kottayam', 'कोट्टयम': 'kottayam',
+            
+            
+            # ==================== GUJARAT DISTRICTS ====================
+            # Ahmedabad
+            'અમદાવાદ': 'ahmedabad', 'अहमदाबाद': 'ahmedabad', 'அகமதாபாத்': 'ahmedabad',
+            'అహ్మదాబాద్': 'ahmedabad', 'അഹമ്മദാബാദ്': 'ahmedabad', 'আহমেদাবাদ': 'ahmedabad',
+            'ਅਹਿਮਦਾਬਾਦ': 'ahmedabad', 'amdavad': 'ahmedabad',
+            
+            # Surat
+            'સુરત': 'surat', 'सूरत': 'surat', 'சூரத்': 'surat',
+            'సూరత్': 'surat', 'സൂററ്': 'surat',
+            
+            # Vadodara / Baroda
+            'વડોદરા': 'vadodara', 'वडोदरा': 'vadodara', 'வடோதரா': 'vadodara',
+            'baroda': 'vadodara',
+            
+            # Rajkot
+            'રાજકોટ': 'rajkot', 'राजकोट': 'rajkot', 'ராஜ்கோட்': 'rajkot',
+            
+            # Bhavnagar
+            'ભાવનગર': 'bhavnagar', 'भावनगर': 'bhavnagar',
+            
+            # Jamnagar
+            'જામનગર': 'jamnagar', 'जामनगर': 'jamnagar',
+            
+            
+            # ==================== WEST BENGAL DISTRICTS ====================
+            # Kolkata / Calcutta
+            'কলকাতা': 'kolkata', 'कोलकाता': 'kolkata', 'கொல்கத்தா': 'kolkata',
+            'కోల్‌కతా': 'kolkata', 'കോൽക്കത്ത': 'kolkata', 'કોલકાતા': 'kolkata',
+            'ਕੋਲਕਾਤਾ': 'kolkata', 'calcutta': 'kolkata',
+            
+            # Darjeeling
+            'দার্জিলিং': 'darjeeling', 'दार्जीलिंग': 'darjeeling', 'தார்ஜிலிங்': 'darjeeling',
+            
+            # Howrah
+            'হাওড়া': 'howrah', 'हावड़ा': 'howrah',
+            
+            # Siliguri
+            'শিলিগুড়ি': 'siliguri', 'सिलीगुड़ी': 'siliguri',
+            
+            
+            # ==================== PUNJAB DISTRICTS ====================
+            # Ludhiana
+            'ਲੁਧਿਆਣਾ': 'ludhiana', 'लुधियाना': 'ludhiana', 'லுதியானா': 'ludhiana',
+            'లుధియానా': 'ludhiana', 'ലുധിയാന': 'ludhiana',
+            
+            # Amritsar
+            'ਅੰਮ੍ਰਿਤਸਰ': 'amritsar', 'अमृतसर': 'amritsar', 'அம்ரித்சர்': 'amritsar',
+            
+            # Jalandhar
+            'ਜਲੰਧਰ': 'jalandhar', 'जालंधर': 'jalandhar',
+            
+            # Patiala
+            'ਪਟਿਆਲਾ': 'patiala', 'पटियाला': 'patiala',
+            
+            
+            # ==================== RAJASTHAN DISTRICTS ====================
+            # Jaipur
+            'जयपुर': 'jaipur', 'ஜெய்ப்பூர்': 'jaipur', 'జైపూర్': 'jaipur',
+            'ജയ്പൂര്': 'jaipur', 'জয়পুর': 'jaipur', 'જયપુર': 'jaipur',
+            
+            # Jodhpur
+            'जोधपुर': 'jodhpur', 'ஜோத்பூர்': 'jodhpur',
+            
+            # Udaipur
+            'उदयपुर': 'udaipur', 'உதய்ப்பூர்': 'udaipur',
+            
+            # Kota
+            'कोटा': 'kota', 'கோட்டா': 'kota',
+            
+            
+            # ==================== DELHI ====================
+            # Delhi / New Delhi
+            'दिल्ली': 'delhi', 'டெல்லி': 'delhi', 'ఢిల్లీ': 'delhi',
+            'ഡൽഹി': 'delhi', 'দিল্লি': 'delhi', 'દિલ્લી': 'delhi',
+            'ਦਿੱਲੀ': 'delhi', 'new delhi': 'delhi',
+            
+            
+            # ==================== STATES (ALL LANGUAGES) ====================
+            # Karnataka
+            'ಕರ್ನಾಟಕ': 'karnataka', 'कर्नाटक': 'karnataka', 'கர்நாடகா': 'karnataka',
+            'కర్ణాటక': 'karnataka', 'കര്‍ണാടക': 'karnataka', 'কর্ণাটক': 'karnataka',
+            'કર્ણાટક': 'karnataka', 'ਕਰਨਾਟਕ': 'karnataka',
+            
+            # Maharashtra
+            'महाराष्ट्र': 'maharashtra', 'மஹாராஷ்டிரா': 'maharashtra', 'మహారాష్ట్ర': 'maharashtra',
+            'മഹാരാഷ്ട്ര': 'maharashtra', 'মহারাষ্ট্র': 'maharashtra', 'મહારાષ્ટ્ર': 'maharashtra',
+            'ਮਹਾਰਾਸ਼ਟਰ': 'maharashtra',
+            
+            # Tamil Nadu
+            'தமிழ்நாடு': 'tamil nadu', 'तमिल नाडु': 'tamil nadu', 'తమిళనాడు': 'tamil nadu',
+            'തമിഴ്നാട്': 'tamil nadu', 'তামিলনাডু': 'tamil nadu', 'તમિલનાડુ': 'tamil nadu',
+            'तमिलनाडु': 'tamil nadu', 'ತಮಿಳುನಾಡು': 'tamil nadu',
+            
+            # Kerala
+            'കേരളം': 'kerala', 'केरल': 'kerala', 'கேரளா': 'kerala',
+            'కేరళ': 'kerala', 'কেরল': 'kerala', 'કેરળ': 'kerala',
+            'ਕੇਰਲ': 'kerala', 'ಕೇರಳ': 'kerala',
+            
+            # Andhra Pradesh
+            'ఆంధ్ర ప్రదేశ్': 'andhra pradesh', 'आंध्र प्रदेश': 'andhra pradesh',
+            'ஆந்திரப் பிரதேசம்': 'andhra pradesh', 'ആന്ധ്രപ്രദേശ്': 'andhra pradesh',
+            
+            # Telangana
+            'తెలంగాణ': 'telangana', 'तेलंगाना': 'telangana', 'తెలంగాణ': 'telangana',
+            
+            # Gujarat
+            'ગુજરાત': 'gujarat', 'गुजरात': 'gujarat', 'குஜராத்': 'gujarat',
+            'గుజరాత్': 'gujarat', 'ഗുജറാത്ത്': 'gujarat', 'গুজরাট': 'gujarat',
+            'ਗੁਜਰਾਤ': 'gujarat', 'ಗುಜರಾತ್': 'gujarat',
+            
+            # Punjab
+            'ਪੰਜਾਬ': 'punjab', 'पंजाब': 'punjab', 'பஞ்சாப்': 'punjab',
+            'పంజాబ్': 'punjab', 'പഞ്ചാബ്': 'punjab', 'পাঞ্জাব': 'punjab',
+            'પંજાબ': 'punjab', 'ಪಂಜಾಬ್': 'punjab',
+            
+            # West Bengal
+            'পশ্চিমবঙ্গ': 'west bengal', 'पश्चिम बंगाल': 'west bengal',
+            'மேற்கு வங்காளம்': 'west bengal', 'పశ్చిమ బెంగాల్': 'west bengal',
+            
+            # Rajasthan
+            'राजस्थान': 'rajasthan', 'ராஜஸ்தான்': 'rajasthan', 'రాజస్థాన్': 'rajasthan',
+            'രാജസ്ഥാന്': 'rajasthan', 'রাজস্থান': 'rajasthan', 'રાજસ્થાન': 'rajasthan',
+            
+            # Uttar Pradesh
+            'उत्तर प्रदेश': 'uttar pradesh', 'உத்தரப் பிரதேசம்': 'uttar pradesh',
+            'ఉత్తర ప్రదేశ్': 'uttar pradesh', 'উত্তরপ্রদেশ': 'uttar pradesh',
+            
+            # Madhya Pradesh
+            'मध्य प्रदेश': 'madhya pradesh', 'மத்தியப் பிரதேசம்': 'madhya pradesh',
+            
+            # Bihar
+            'बिहार': 'bihar', 'பீகார்': 'bihar', 'బిహార్': 'bihar',
+            'ബിഹാര്': 'bihar', 'বিহার': 'bihar',
+            
+            # Odisha
+            'ଓଡ଼ିଶା': 'odisha', 'ओडिशा': 'odisha', 'ஒடிசா': 'odisha',
+            
+            # Assam
+            'অসম': 'assam', 'असम': 'assam', 'அஸ்ஸாம்': 'assam',
+            
+            # Haryana
+            'हरियाणा': 'haryana', 'ஹரியானா': 'haryana',
+            
+            # Jharkhand
+            'झारखंड': 'jharkhand', 'ஜார்கண்ட்': 'jharkhand',
+            
+            # Chhattisgarh
+            'छत्तीसगढ़': 'chhattisgarh', 'சத்தீஸ்கர்': 'chhattisgarh',
+            
+            # Uttarakhand
+            'उत्तराखंड': 'uttarakhand', 'உத்தரகண்ட்': 'uttarakhand',
+            
+            # Himachal Pradesh
+            'हिमाचल प्रदेश': 'himachal pradesh',
+            
+            # Jammu and Kashmir
+            'जम्मू और कश्मीर': 'jammu and kashmir',
+            
+            # Goa
+            'गोवा': 'goa', 'கோவா': 'goa', 'గోవా': 'goa',
+            'ഗോവ': 'goa', 'গোয়া': 'goa', 'ગોવા': 'goa',
+            
+            
+            # ==================== COMMON WORDS/ACTIONS (ALL LANGUAGES) ====================
+            # Water
+            'ನೀರಿನ': 'water', 'ನೀರು': 'water', 'पानी': 'water', 'நீர்': 'water',
+            'నీరు': 'water', 'വെള്ളം': 'water', 'জল': 'water', 'પાણી': 'water',
+            'ਪਾਣੀ': 'water', 'जल': 'water', 'தண்ணீர்': 'water',
+            
+            # Information / Data
+            'ಮಾಹಿತಿ': 'information', 'माहिती': 'information', 'தகவல்': 'information',
+            'సమాచారం': 'information', 'വിവരം': 'information', 'তথ্য': 'information',
+            'માહિતી': 'information', 'ਜਾਣਕਾਰੀ': 'information', 'जानकारी': 'information',
+            'ಡೇಟಾ': 'data', 'डेटा': 'data', 'தரவு': 'data', 'డేటా': 'data',
+            
+            # About
+            'ಬಗ್ಗೆ': 'about', 'बारे': 'about', 'பற்றி': 'about', 'గురించి': 'about',
+            'കുറിച്ച്': 'about', 'সম্পর্কে': 'about', 'વિશે': 'about', 'ਬਾਰੇ': 'about',
+            
+            # Tell / Show
+            'बताओ': 'tell', 'சொல்லுங்கள்': 'tell', 'చెప్పండి': 'tell',
+            'പറയൂ': 'tell', 'বলুন': 'tell', 'કહો': 'tell', 'ਦੱਸੋ': 'tell',
+            'दिखाओ': 'show', 'காட்டு': 'show', 'చూపించు': 'show', 'കാണിക്കൂ': 'show',
+            'দেখান': 'show', 'બતાવો': 'show', 'ਵਿਖਾਓ': 'show',
+            
+            # All
+            'सभी': 'all', 'எல்லா': 'all', 'అన్ని': 'all', 'എല്ലാ': 'all',
+            'সব': 'all', 'બધા': 'all', 'ਸਾਰੇ': 'all', 'ಎಲ್ಲಾ': 'all',
+            
+            # States
+            'राज्य': 'states', 'மாநிலங்கள்': 'states', 'రాష్ట్రాలు': 'states',
+            'സംസ്ഥാനങ്ങൾ': 'states', 'রাজ্য': 'states', 'રાજ્યો': 'states',
+            'ਰਾਜ': 'states', 'ರಾಜ್ಯಗಳು': 'states',
+            
+            # Rainfall / Rain
+            'वर्षा': 'rainfall', 'மழை': 'rainfall', 'వర్షపాతం': 'rainfall',
+            'മഴ': 'rainfall', 'বৃষ্টিপাত': 'rainfall', 'વરસાદ': 'rainfall',
+            'ਬਾਰਿਸ਼': 'rainfall', 'ಮಳೆ': 'rainfall', 'बारिश': 'rain',
+            
+            # Groundwater
+            'भूजल': 'groundwater', 'நிலத்தடி நீர்': 'groundwater', 'భూగర్భ జలం': 'groundwater',
+            'ഭൂഗർഭജലം': 'groundwater', 'ভূগর্ভস্থ জল': 'groundwater', 'ભૂગર્ભજળ': 'groundwater',
+            'ਭੂਮੀਗਤ ਪਾਣੀ': 'groundwater', 'ಭೂಗರ್ಭ ನೀರು': 'groundwater',
+            
+            # Extraction
+            'निष्कर्षण': 'extraction', 'பிரித்தெடுத்தல்': 'extraction', 'వెలికితీత': 'extraction',
+            'ഉത്സർഗം': 'extraction', 'নিষ্কাশন': 'extraction', 'નિષ્કર્ષણ': 'extraction',
+            
+            # Compare
+            'तुलना': 'compare', 'ஒப்பீடு': 'compare', 'పోల్చండి': 'compare',
+            'താരതമ്യം': 'compare', 'তুলনা': 'compare', 'તુલના': 'compare',
+            'ತುಲನೆ': 'compare',
+            
+            # District
+            'जिला': 'district', 'மாவட்டம்': 'district', 'జిల్లా': 'district',
+            'ജില്ല': 'district', 'জেলা': 'district', 'જિલ્લો': 'district',
+            'ಜಿಲ್ಲೆ': 'district',
+        }
+    
+    def translate_text(self, text: str, target_language: str, source_language: str = 'auto') -> str:
+        """Translate text using deep-translator with comprehensive keyword mapping"""
+        if not text or not text.strip():
+            return text
+        
+        try:
+            # Apply keyword mapping first (most accurate for location names)
+            mapped_text = self._apply_keyword_mapping(text)
+            if mapped_text != text:
+                logger.info(f"Keyword mapped: '{text}' -> '{mapped_text}'")
+                text = mapped_text
+            
+            # If already in target language, return
+            if target_language == 'en' and source_language == 'en':
+                return text
+            
+            # Try deep-translator
+            translated = GoogleTranslator(source=source_language, target=target_language).translate(text)
+            
+            if translated and translated != text:
+                logger.info(f"Translated: '{text}' -> '{translated}'")
+                return translated
+            
+            return text
+            
+        except Exception as e:
+            logger.error(f"Translation error: {e}")
+            return self._apply_keyword_mapping(text)
+    
+    def _apply_keyword_mapping(self, text: str) -> str:
+        """Map non-English keywords to English"""
+        result = text
+        # Sort by length (longest first) to match longer phrases first
+        sorted_mappings = sorted(self.keyword_map.items(), key=lambda x: len(x[0]), reverse=True)
+        for native, english in sorted_mappings:
+            if native in result:
+                result = result.replace(native, english)
+        return result
+    
+    def detect_language(self, text: str) -> str:
+        """Detect language based on Unicode character ranges"""
+        try:
+            if not text or not text.strip():
+                return 'en'
+            
+            # Check for specific script ranges
+            if any('\u0900' <= char <= '\u097F' for char in text):  # Devanagari (Hindi/Marathi)
+                return 'hi'
+            elif any('\u0C80' <= char <= '\u0CFF' for char in text):  # Kannada
+                return 'kn'
+            elif any('\u0B80' <= char <= '\u0BFF' for char in text):  # Tamil
+                return 'ta'
+            elif any('\u0C00' <= char <= '\u0C7F' for char in text):  # Telugu
+                return 'te'
+            elif any('\u0D00' <= char <= '\u0D7F' for char in text):  # Malayalam
+                return 'ml'
+            elif any('\u0A80' <= char <= '\u0AFF' for char in text):  # Gujarati
+                return 'gu'
+            elif any('\u0980' <= char <= '\u09FF' for char in text):  # Bengali
+                return 'bn'
+            elif any('\u0A00' <= char <= '\u0A7F' for char in text):  # Gurmukhi (Punjabi)
+                return 'pa'
+            
+            return 'en'
+            
+        except Exception as e:
+            logger.error(f"Language detection error: {e}")
+            return 'en'
+
+translator = TranslationService()
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\public\index.html =======
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    
+    <meta name="description" content="INGRES AI Chatbot - Groundwater Information System" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <title>INGRES AI Chatbot</title>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\App.css =======
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --primary: #667eea;
+  --secondary: #764ba2;
+  --success: #10b981;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --bg-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  --card-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+}
+
+body {
+  font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+}
+
+.app-container {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Sidebar Styles */
+.sidebar {
+  width: 280px;
+  background: white;
+  box-shadow: 2px 0 10px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  padding: 20px;
+  background: var(--bg-gradient);
+  color: white;
+}
+
+.sidebar-header h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.sidebar-section {
+  padding: 20px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.sidebar-section h3 {
+  color: #374151;
+  font-size: 1rem;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.section-header:hover {
+  color: var(--primary);
+}
+
+.language-select {
+  width: 100%;
+  padding: 12px;
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 1rem;
+  background: white;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.language-select:hover,
+.language-select:focus {
+  border-color: var(--primary);
+  outline: none;
+}
+
+.states-list {
+  max-height: 400px;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+
+.state-item {
+  width: 100%;
+  padding: 10px;
+  margin: 5px 0;
+  background: #f9fafb;
+  border: none;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.9rem;
+}
+
+.state-item:hover {
+  background: var(--primary);
+  color: white;
+  transform: translateX(5px);
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 20px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 0.85rem;
+}
+
+.version {
+  margin-top: 5px;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+/* Main Content */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-header {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.header-gradient {
+  background: var(--bg-gradient);
+  padding: 30px;
+  color: white;
+  text-align: center;
+}
+
+.header-gradient h1 {
+  font-size: 2.5rem;
+  font-weight: 800;
+  margin-bottom: 10px;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.header-gradient p {
+  font-size: 1.1rem;
+  opacity: 0.95;
+}
+
+/* Chat Window */
+.chat-window {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: white;
+  margin: 20px;
+  border-radius: 20px;
+  box-shadow: var(--card-shadow);
+  overflow: hidden;
+}
+
+.messages-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 30px;
+  background: linear-gradient(to bottom, #f9fafb, #ffffff);
+}
+
+.message-bubble {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 20px;
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-bubble.user {
+  align-items: flex-end;
+}
+
+.message-bubble.bot {
+  align-items: flex-start;
+}
+
+.message-content {
+  max-width: 75%;
+  padding: 18px 22px;
+  border-radius: 18px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+
+.message-bubble.user .message-content {
+  background: var(--bg-gradient);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
+
+.message-bubble.bot .message-content {
+  background: white;
+  color: #1f2937;
+  border: 1px solid #e5e7eb;
+  border-bottom-left-radius: 4px;
+}
+
+.message-text {
+  line-height: 1.6;
+  font-size: 1rem;
+  margin-bottom: 0;
+}
+
+.message-time {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  margin-top: 5px;
+}
+
+/* Data Cards */
+.data-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 15px;
+  margin-top: 15px;
+}
+
+.data-card {
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+  border-radius: 12px;
+  padding: 15px;
+  border: 1px solid #bae6fd;
+  transition: transform 0.2s;
+}
+
+.data-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.card-header h3 {
+  font-size: 1.1rem;
+  color: #0c4a6e;
+  font-weight: 700;
+}
+
+.state-badge {
+  background: var(--primary);
+  color: white;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.data-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px;
+  background: white;
+  border-radius: 6px;
+}
+
+.data-label {
+  font-size: 0.9rem;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.data-value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.data-value.critical {
+  color: var(--danger);
+  font-weight: 800;
+}
+
+/* Suggestions */
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.suggestion-chip {
+  padding: 8px 16px;
+  background: rgba(102, 126, 234, 0.1);
+  border: 1px solid var(--primary);
+  border-radius: 20px;
+  color: var(--primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.suggestion-chip:hover {
+  background: var(--primary);
+  color: white;
+  transform: scale(1.05);
+}
+
+/* Typing Indicator */
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 20px;
+  background: white;
+  border-radius: 18px;
+  width: fit-content;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e7eb;
+}
+
+.typing-dots {
+  display: flex;
+  gap: 5px;
+}
+
+.typing-dots span {
+  width: 8px;
+  height: 8px;
+  background: var(--primary);
+  border-radius: 50%;
+  animation: bounce 1.4s infinite;
+}
+
+.typing-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-10px);
+  }
+}
+
+.typing-text {
+  font-size: 0.9rem;
+  color: #6b7280;
+  font-style: italic;
+}
+
+/* Input Bar */
+.input-bar {
+  display: flex;
+  padding: 20px;
+  background: white;
+  border-top: 1px solid #e5e7eb;
+  gap: 10px;
+}
+
+.message-input {
+  flex: 1;
+  padding: 15px 20px;
+  border: 2px solid #e5e7eb;
+  border-radius: 25px;
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.3s;
+}
+
+.message-input:focus {
+  border-color: var(--primary);
+}
+
+.send-button {
+  padding: 15px 25px;
+  background: var(--bg-gradient);
+  color: white;
+  border: none;
+  border-radius: 25px;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.send-button:hover:not(:disabled) {
+  transform: scale(1.05);
+  box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+}
+
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--primary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--secondary);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .sidebar {
+    position: absolute;
+    left: -280px;
+    z-index: 1000;
+    transition: left 0.3s;
+  }
+
+  .sidebar.open {
+    left: 0;
+  }
+
+  .header-gradient h1 {
+    font-size: 1.8rem;
+  }
+
+  .data-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .message-content {
+    max-width: 90%;
+  }
+}
+/* Chart Styles */
+.chart-container {
+  margin-top: 20px;
+  padding: 20px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.chart-container h4 {
+  color: #667eea;
+  margin-bottom: 15px;
+  font-size: 1.1rem;
+}
+
+.suggestions-label {
+  display: block;
+  font-size: 0.9rem;
+  color: #6b7280;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.suggestions {
+  margin-top: 15px;
+}
+
+/* Scrollbar for data cards */
+.data-cards::-webkit-scrollbar {
+  height: 6px;
+}
+
+.data-cards::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+.data-cards::-webkit-scrollbar-thumb {
+  background: #667eea;
+  border-radius: 3px;
+}
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\App.jsx =======
+
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import ChatWindow from './components/ChatWindow';
+import Sidebar from './components/Sidebar';
+import './App.css';
+
+function App() {
+  const [language, setLanguage] = useState('en');
+  const [states, setStates] = useState([]);
+  const [selectedState, setSelectedState] = useState(null);
+
+  useEffect(() => {
+    // Fetch available states
+    axios.get('http://localhost:8000/states')
+      .then(response => setStates(response.data))
+      .catch(error => console.error('Error fetching states:', error));
+  }, []);
+
+  return (
+    <div className="app-container">
+      <Sidebar 
+        states={states} 
+        language={language}
+        setLanguage={setLanguage}
+        onStateSelect={setSelectedState}
+      />
+      <div className="main-content">
+        <header className="app-header">
+          <div className="header-gradient">
+            <h1>🌊 INGRES AI Assistant</h1>
+            <p>Intelligent Groundwater Resource & Environmental System</p>
+          </div>
+        </header>
+        <ChatWindow 
+          language={language} 
+          selectedState={selectedState}
+        />
+      </div>
+    </div>
+  );
+}
+
+export default App;
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\components\ChartDisplay.jsx =======
+
+import React from 'react';
+import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+
+const COLORS = ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'];
+
+const ChartDisplay = ({ chartData }) => {
+  if (!chartData || !chartData.type) {
+    console.log('No chart data received');
+    return null;
+  }
+
+  console.log('Chart data:', chartData); // Debug log
+
+  const { type, data } = chartData;
+
+  if (type === 'rainfall') {
+    return (
+      <div className="chart-container">
+        <h4>📊 Rainfall Distribution (mm)</h4>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="district" angle={-45} textAnchor="end" height={100} />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            <Bar dataKey="rainfall" fill="#667eea" name="Rainfall (mm)" />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
+
+  if (type === 'extraction') {
+    return (
+      <div className="chart-container">
+        <h4>📊 Groundwater Extraction Stage (%)</h4>
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="district" angle={-45} textAnchor="end" height={100} />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            <Line type="monotone" dataKey="extraction" stroke="#764ba2" strokeWidth={3} name="Extraction (%)" />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
+
+  if (type === 'comparison') {
+    return (
+      <div className="chart-container">
+        <h4>📊 Comparison Analysis</h4>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="name" />
+            <YAxis yAxisId="left" orientation="left" stroke="#667eea" />
+            <YAxis yAxisId="right" orientation="right" stroke="#764ba2" />
+            <Tooltip />
+            <Legend />
+            <Bar yAxisId="left" dataKey="rainfall" fill="#667eea" name="Rainfall (mm)" />
+            <Bar yAxisId="right" dataKey="extraction" fill="#764ba2" name="Extraction (%)" />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
+
+  if (type === 'state_overview') {
+    return (
+      <div className="chart-container">
+        <h4>📊 State Overview</h4>
+        <ResponsiveContainer width="100%" height={300}>
+          <PieChart>
+            <Pie
+              data={data}
+              cx="50%"
+              cy="50%"
+              labelLine={false}
+              label={({ name, value }) => `${name}: ${value.toFixed(2)}`}
+              outerRadius={80}
+              fill="#8884d8"
+              dataKey="value"
+            >
+              {data.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+              ))}
+            </Pie>
+            <Tooltip />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
+
+  return null;
+};
+
+export default ChartDisplay;
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\components\ChatWindow.jsx =======
+
+import React, { useState, useEffect, useRef } from 'react';
+import axios from 'axios';
+import MessageBubble from './MessageBubble';
+import InputBar from './InputBar';
+
+const ChatWindow = ({ language, selectedState }) => {
+  const [messages, setMessages] = useState([
+    {
+      type: 'bot',
+      text: 'Hello! I\'m your INGRES AI assistant. Ask me about groundwater data across India! 🌍💧',
+      timestamp: new Date().toLocaleTimeString(),
+      suggestions: ['Karnataka', 'Mysore', 'Show all states', 'Compare Karnataka and Kerala', 'Rainfall in Bangalore']
+    }
+  ]);
+  const [isTyping, setIsTyping] = useState(false);
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  useEffect(() => {
+    if (selectedState) {
+      sendMessage(`Tell me about ${selectedState}`);
+    }
+  }, [selectedState]);
+
+  const sendMessage = async (text) => {
+    if (!text.trim()) return;
+
+    const userMessage = {
+      type: 'user',
+      text,
+      timestamp: new Date().toLocaleTimeString()
+    };
+    setMessages(prev => [...prev, userMessage]);
+    setIsTyping(true);
+
+    try {
+      const response = await axios.post('http://localhost:8000/chat', {
+        message: text,
+        language: language
+      });
+
+      const botMessage = {
+        type: 'bot',
+        text: response.data.response,
+        data: response.data.data,
+        suggestions: response.data.suggestions,
+        chartData: response.data.chart_data,
+        timestamp: new Date().toLocaleTimeString()
+      };
+
+      setMessages(prev => [...prev, botMessage]);
+    } catch (error) {
+      const errorMessage = {
+        type: 'bot',
+        text: 'Sorry, I encountered an error. Please try again. 😔',
+        timestamp: new Date().toLocaleTimeString()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+      console.error('Chat error:', error);
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  const handleSuggestionClick = (suggestion) => {
+    sendMessage(suggestion);
+  };
+
+  return (
+    <div className="chat-window">
+      <div className="messages-container">
+        {messages.map((msg, idx) => (
+          <MessageBubble 
+            key={idx} 
+            message={msg} 
+            onSuggestionClick={handleSuggestionClick}
+          />
+        ))}
+        {isTyping && (
+          <div className="typing-indicator">
+            <div className="typing-dots">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <span className="typing-text">INGRES is thinking...</span>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+      <InputBar onSend={sendMessage} language={language} />
+    </div>
+  );
+};
+
+export default ChatWindow;
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\components\DataCard.jsx =======
+
+import React from 'react';
+
+const DataCard = ({ data }) => {
+  return (
+    <div className="data-card">
+      <div className="card-header">
+        <h3>{data.district}</h3>
+        <span className="state-badge">{data.state}</span>
+      </div>
+      <div className="card-body">
+        {data.rainfall !== null && (
+          <div className="data-item">
+            <span className="data-label">💧 Rainfall</span>
+            <span className="data-value">{data.rainfall} mm</span>
+          </div>
+        )}
+        {data.extraction_stage !== null && (
+          <div className="data-item">
+            <span className="data-label">📊 Extraction Stage</span>
+            <span className={`data-value ${data.extraction_stage > 70 ? 'critical' : ''}`}>
+              {data.extraction_stage}%
+            </span>
+          </div>
+        )}
+        {data.gw_recharge !== null && (
+          <div className="data-item">
+            <span className="data-label">♻️ GW Recharge</span>
+            <span className="data-value">{data.gw_recharge} ham</span>
+          </div>
+        )}
+        {data.net_availability !== null && (
+          <div className="data-item">
+            <span className="data-label">💦 Net Availability</span>
+            <span className="data-value">{data.net_availability} ham</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default DataCard;
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\components\InputBar.jsx =======
+
+import React, { useState } from 'react';
+import { FaPaperPlane, FaMicrophone } from 'react-icons/fa';
+
+const InputBar = ({ onSend, language }) => {
+  const [input, setInput] = useState('');
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (input.trim()) {
+      onSend(input);
+      setInput('');
+    }
+  };
+
+  return (
+    <form className="input-bar" onSubmit={handleSubmit}>
+      <input
+        type="text"
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder={`Ask about groundwater data... (${language.toUpperCase()})`}
+        className="message-input"
+      />
+      <button type="submit" className="send-button" disabled={!input.trim()}>
+        <FaPaperPlane />
+      </button>
+    </form>
+  );
+};
+
+export default InputBar;
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\components\MessageBubble.jsx =======
+
+import React from 'react';
+import DataCard from './DataCard';
+import ChartDisplay from './ChartDisplay';
+
+const MessageBubble = ({ message, onSuggestionClick }) => {
+  return (
+    <div className={`message-bubble ${message.type}`}>
+      <div className="message-content">
+        <p className="message-text">{message.text}</p>
+        
+        {message.chartData && (
+          <ChartDisplay chartData={message.chartData} />
+        )}
+        
+        {message.data && message.data.length > 0 && (
+          <div className="data-cards">
+            {message.data.map((item, idx) => (
+              <DataCard key={idx} data={item} />
+            ))}
+          </div>
+        )}
+        
+        {message.suggestions && message.suggestions.length > 0 && (
+          <div className="suggestions">
+            <span className="suggestions-label">Try these:</span>
+            {message.suggestions.map((suggestion, idx) => (
+              <button 
+                key={idx} 
+                className="suggestion-chip"
+                onClick={() => onSuggestionClick(suggestion)}
+              >
+                {suggestion}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <span className="message-time">{message.timestamp}</span>
+    </div>
+  );
+};
+
+export default MessageBubble;
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\components\Sidebar.jsx =======
+
+import React, { useState } from 'react';
+import { FaGlobe, FaChevronDown, FaChevronUp } from 'react-icons/fa';
+
+const Sidebar = ({ states, language, setLanguage, onStateSelect }) => {
+  const [showStates, setShowStates] = useState(false);
+
+  const languages = [
+    { code: 'en', name: 'English', flag: '🇬🇧' },
+    { code: 'hi', name: 'हिन्दी', flag: '🇮🇳' },
+    { code: 'kn', name: 'ಕನ್ನಡ', flag: '🇮🇳' },
+    { code: 'te', name: 'తెలుగు', flag: '🇮🇳' },
+    { code: 'ta', name: 'தமிழ்', flag: '🇮🇳' },
+    { code: 'mr', name: 'मराठी', flag: '🇮🇳' },
+    { code: 'bn', name: 'বাংলা', flag: '🇮🇳' },
+    { code: 'gu', name: 'ગુજરાતી', flag: '🇮🇳' }
+  ];
+
+  return (
+    <div className="sidebar">
+      <div className="sidebar-header">
+        <h2>🗺️ Navigation</h2>
+      </div>
+      
+      <div className="sidebar-section">
+        <h3><FaGlobe /> Language</h3>
+        <select 
+          className="language-select"
+          value={language}
+          onChange={(e) => setLanguage(e.target.value)}
+        >
+          {languages.map(lang => (
+            <option key={lang.code} value={lang.code}>
+              {lang.flag} {lang.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="sidebar-section">
+        <div 
+          className="section-header"
+          onClick={() => setShowStates(!showStates)}
+        >
+          <h3>📍 States ({states.length})</h3>
+          {showStates ? <FaChevronUp /> : <FaChevronDown />}
+        </div>
+        
+        {showStates && (
+          <div className="states-list">
+            {states.map(state => (
+              <button
+                key={state}
+                className="state-item"
+                onClick={() => onStateSelect(state)}
+              >
+                {state}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="sidebar-footer">
+        <p>💧 Powered by AI</p>
+        <p className="version">v2.0</p>
+      </div>
+    </div>
+  );
+};
+
+export default Sidebar;
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\frontend\src\index.js =======
+
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\rasa\actions\actions.py =======
+
+from typing import Any, Text, Dict, List
+from rasa_sdk import Action, Tracker
+from rasa_sdk.executor import CollectingDispatcher
+import httpx
+
+BACKEND_URL = "http://localhost:8000"
+
+class ActionGetGroundwaterData(Action):
+    def name(self) -> Text:
+        return "action_get_groundwater_data"
+
+    async def run(self, dispatcher: CollectingDispatcher,
+            tracker: Tracker,
+            domain: Dict[Text, Any]) -> List[Dict[Text, Any]]:
+        
+        state = tracker.get_slot("state")
+        district = tracker.get_slot("district")
+        
+        if state:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(f"{BACKEND_URL}/stats/{state}")
+                    stats = response.json()
+                
+                message = f"Groundwater data for {state}:\n"
+                message += f"• Average Rainfall: {stats['avg_rainfall']:.2f} mm\n"
+                message += f"• Average Extraction Stage: {stats['avg_extraction_stage']:.2f}%\n"
+                message += f"• Total Districts: {stats['total_records']}"
+                
+                dispatcher.utter_message(text=message)
+            except Exception as e:
+                dispatcher.utter_message(text=f"Sorry, I couldn't fetch data for {state}. Please try another state.")
+        else:
+            dispatcher.utter_message(text="Please specify a state name.")
+        
+        return []
+
+class ActionGetStateList(Action):
+    def name(self) -> Text:
+        return "action_get_state_list"
+
+    async def run(self, dispatcher: CollectingDispatcher,
+            tracker: Tracker,
+            domain: Dict[Text, Any]) -> List[Dict[Text, Any]]:
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{BACKEND_URL}/states")
+                states = response.json()
+            
+            message = f"I have groundwater data for {len(states)} states:\n"
+            message += ", ".join(states[:10])
+            if len(states) > 10:
+                message += f" and {len(states) - 10} more..."
+            
+            dispatcher.utter_message(text=message)
+        except Exception as e:
+            dispatcher.utter_message(text="Sorry, I couldn't fetch the state list.")
+        
+        return []
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\rasa\config.yml =======
+
+recipe: default.v1
+language: en
+
+pipeline:
+- name: WhitespaceTokenizer
+- name: RegexFeaturizer
+- name: LexicalSyntacticFeaturizer
+- name: CountVectorsFeaturizer
+- name: CountVectorsFeaturizer
+  analyzer: char_wb
+  min_ngram: 1
+  max_ngram: 4
+- name: DIETClassifier
+  epochs: 100
+  constrain_similarities: true
+- name: EntitySynonymMapper
+- name: ResponseSelector
+  epochs: 100
+  constrain_similarities: true
+- name: FallbackClassifier
+  threshold: 0.3
+  ambiguity_threshold: 0.1
+
+policies:
+- name: MemoizationPolicy
+- name: RulePolicy
+- name: UnexpecTEDIntentPolicy
+  max_history: 5
+  epochs: 100
+- name: TEDPolicy
+  max_history: 5
+  epochs: 100
+  constrain_similarities: true
+assistant_id: 20251119-160304-generous-fork
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\rasa\credentials.yml =======
+
+rest:
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\rasa\data\nlu.yml =======
+
+version: "3.1"
+
+nlu:
+- intent: greet
+  examples: |
+    - hi
+    - hello
+    - hey
+    - good morning
+    - good evening
+    - namaste
+    - hi there
+
+- intent: goodbye
+  examples: |
+    - bye
+    - goodbye
+    - see you later
+    - talk to you later
+    - thank you bye
+    - bye bye
+
+- intent: ask_groundwater_info
+  examples: |
+    - tell me about groundwater in [Karnataka](state)
+    - groundwater data for [Maharashtra](state)
+    - what is the groundwater status in [Delhi](state)
+    - show me groundwater information for [Tamil Nadu](state)
+    - [Kerala](state) groundwater
+    - water data for [Bangalore](district)
+    - information about [Mumbai](district)
+    - [Rajasthan](state) water information
+    - tell me about [Gujarat](state)
+    - data for [Andhra Pradesh](state)
+
+- intent: ask_rainfall_data
+  examples: |
+    - what is the rainfall in [Karnataka](state)
+    - rainfall data for [Bangalore](district)
+    - tell me rainfall information for [Maharashtra](state)
+    - how much rain in [Mumbai](district)
+    - [Kerala](state) rainfall
+    - rainfall in [Tamil Nadu](state)
+
+- intent: ask_extraction_stage
+  examples: |
+    - groundwater extraction stage in [Karnataka](state)
+    - extraction level in [Bangalore](district)
+    - how much water is extracted in [Maharashtra](state)
+    - stage of groundwater extraction [Delhi](state)
+    - extraction percentage in [Punjab](state)
+
+- intent: ask_water_availability
+  examples: |
+    - water availability in [Karnataka](state)
+    - how much water is available in [Maharashtra](state)
+    - available groundwater in [Delhi](district)
+    - water resources in [Gujarat](state)
+
+- intent: ask_state_list
+  examples: |
+    - show all states
+    - list all states
+    - which states do you have data for
+    - show me all available states
+    - what states are available
+    - give me list of states
+
+- intent: compare_data
+  examples: |
+    - compare [Bangalore](district) and [Mysore](district)
+    - difference between [Karnataka](state) and [Kerala](state)
+    - compare [Maharashtra](state) with [Gujarat](state)
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\rasa\data\rules.yml =======
+
+version: "3.1"
+
+rules:
+- rule: Say goodbye
+  steps:
+  - intent: goodbye
+  - action: utter_goodbye
+
+- rule: Greet user
+  steps:
+  - intent: greet
+  - action: utter_greet
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\rasa\data\stories.yml =======
+
+version: "3.1"
+
+stories:
+- story: greet user
+  steps:
+  - intent: greet
+  - action: utter_greet
+
+- story: say goodbye
+  steps:
+  - intent: goodbye
+  - action: utter_goodbye
+
+- story: ask about groundwater
+  steps:
+  - intent: ask_groundwater_info
+  - action: utter_default
+
+- story: ask about states
+  steps:
+  - intent: ask_state_list
+  - action: utter_default
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\rasa\domain.yml =======
+
+version: "3.1"
+
+intents:
+  - greet
+  - goodbye
+  - ask_groundwater_info
+  - ask_rainfall_data
+  - ask_extraction_stage
+  - ask_water_availability
+  - compare_data
+  - ask_state_list
+
+entities:
+  - state
+  - district
+  - location
+
+slots:
+  state:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: state
+  district:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: district
+  location:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: location
+
+responses:
+  utter_greet:
+  - text: "Hello! I'm your INGRES AI assistant. I can provide groundwater information for any state or district in India."
+
+  utter_goodbye:
+  - text: "Goodbye! Feel free to return anytime for groundwater data."
+
+  utter_default:
+  - text: "I can help you with groundwater data. Try asking about a specific state or district."
+
+actions: []
+
+session_config:
+  session_expiration_time: 60
+  carry_over_slots_to_new_session: true
+
+
+// ======= C:\Users\Admin\Downloads\ingres-ai-chatbot-\rasa\endpoints.yml =======
+
+action_endpoint:
+  url: "http://localhost:5055/webhook"
