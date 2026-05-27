@@ -11,7 +11,8 @@ function App() {
 
   useEffect(() => {
     // Fetch available states
-    axios.get('http://localhost:8000/states')
+    const API_URL = 'https://ingres-chatbot-pyv6.onrender.com';
+    axios.get(`${API_URL}/states`)
       .then(response => setStates(response.data))
       .catch(error => console.error('Error fetching states:', error));
   }, []);
