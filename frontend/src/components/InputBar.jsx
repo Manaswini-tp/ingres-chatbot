@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FaPaperPlane, FaMicrophone } from 'react-icons/fa';
+import { FaPaperPlane } from 'react-icons/fa';  // ← FIXED: Removed unused FaMicrophone
 
 const InputBar = ({ onSend, language }) => {
   const [input, setInput] = useState('');
