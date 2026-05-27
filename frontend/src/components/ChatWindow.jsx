@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';  // ← Added useCallback
 import axios from 'axios';
 import MessageBubble from './MessageBubble';
 import InputBar from './InputBar';
@@ -23,7 +23,8 @@ const ChatWindow = ({ language, selectedState }) => {
     scrollToBottom();
   }, [messages]);
 
-  const sendMessage = async (text) => {
+  // Wrap sendMessage in useCallback to prevent it from changing on every render
+  const sendMessage = useCallback(async (text) => {
     if (!text.trim()) return;
 
     const userMessage = {
@@ -64,13 +65,13 @@ const ChatWindow = ({ language, selectedState }) => {
     } finally {
       setIsTyping(false);
     }
-  };
+  }, [language]);  // ← Dependencies for useCallback
 
   useEffect(() => {
     if (selectedState) {
       sendMessage(`Tell me about ${selectedState}`);
     }
-  }, [selectedState, sendMessage]);  // ← FIXED: Added sendMessage
+  }, [selectedState, sendMessage]);  // ← This is now stable
 
   const handleSuggestionClick = (suggestion) => {
     sendMessage(suggestion);
