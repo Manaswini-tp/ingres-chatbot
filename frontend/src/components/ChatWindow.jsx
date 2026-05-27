@@ -23,12 +23,6 @@ const ChatWindow = ({ language, selectedState }) => {
     scrollToBottom();
   }, [messages]);
 
-  useEffect(() => {
-    if (selectedState) {
-      sendMessage(`Tell me about ${selectedState}`);
-    }
-  }, [selectedState]);
-
   const sendMessage = async (text) => {
     if (!text.trim()) return;
 
@@ -40,8 +34,11 @@ const ChatWindow = ({ language, selectedState }) => {
     setMessages(prev => [...prev, userMessage]);
     setIsTyping(true);
 
+    // Get API URL from environment variable (for production) or fallback to localhost
+    const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
     try {
-      const response = await axios.post('http://localhost:8000/chat', {
+      const response = await axios.post(`${API_URL}/chat`, {
         message: text,
         language: language
       });
@@ -68,6 +65,12 @@ const ChatWindow = ({ language, selectedState }) => {
       setIsTyping(false);
     }
   };
+
+  useEffect(() => {
+    if (selectedState) {
+      sendMessage(`Tell me about ${selectedState}`);
+    }
+  }, [selectedState, sendMessage]);  // ← FIXED: Added sendMessage
 
   const handleSuggestionClick = (suggestion) => {
     sendMessage(suggestion);
