@@ -36,7 +36,8 @@ const ChatWindow = ({ language, selectedState }) => {
     setIsTyping(true);
 
     // Get API URL from environment variable (for production) or fallback to localhost
-    const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+    //const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+    const API_URL = 'https://ingres-chatbot-pyv6.onrender.com'; //temporarily
 
     try {
       const response = await axios.post(`${API_URL}/chat`, {
