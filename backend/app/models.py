@@ -26,3 +26,18 @@ class ChatHistory(Base):
     bot_response = Column(Text)
     language = Column(String, default="en")
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+from datetime import datetime
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    full_name = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Integer, default=1)  # 1 = active, 0 = inactive
+    query_count = Column(Integer, default=0)
+    last_login = Column(DateTime, nullable=True)
