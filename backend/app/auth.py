@@ -7,7 +7,7 @@ import os
 from . import models, schemas
 
 # JWT Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", 9988b3409918ca27e416e18cc8ed534788249fc2dd89879b1c7060ed3f45f0f1)
+SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
