@@ -2,14 +2,15 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 from . import models, schemas, crud
 from .database import engine, get_db
 from .translation import translator
 import logging
 import httpx
-import os  # ADD THIS
+import os
 
-# ========== ADD THESE NEW IMPORTS ==========
+# ========== AUTH IMPORTS ==========
 from . import auth
 from .models import User
 from .schemas import UserCreate, UserLogin, Token, UserResponse
@@ -21,20 +22,95 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="INGRES Chatbot API", version="3.0")
 
-# CORS - Update this with your Vercel URL
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change to your Vercel URL in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Rasa configuration
-RASA_SERVER_URL = "http://localhost:5005"
-USE_RASA = True
+RASA_SERVER_URL = os.getenv("RASA_SERVER_URL", "http://localhost:5005")
+USE_RASA = os.getenv("USE_RASA", "True").lower() == "true"
 
-# ========== MODIFY STARTUP EVENT (Remove Excel Loading) ==========
+
+# ========== HELPER FUNCTIONS ==========
+
+async def get_rasa_prediction(text: str) -> Optional[Dict[str, Any]]:
+    """Get intent and entities from Rasa"""
+    if not USE_RASA:
+        return None
+    
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.post(
+                f"{RASA_SERVER_URL}/model/parse",
+                json={"text": text}
+            )
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"Rasa prediction: intent={data.get('intent', {}).get('name')}, confidence={data.get('intent', {}).get('confidence')}")
+                return data
+    except Exception as e:
+        logger.warning(f"Rasa call failed: {e}")
+    
+    return None
+
+
+def normalize_location_name(name: str) -> set:
+    """Generate all possible variations of a location name"""
+    name_lower = name.lower().strip()
+    variations = {name_lower}
+    
+    city_variations = {
+        'bangalore': ['bengaluru', 'bangalore', 'bangaluru', 'bengalore'],
+        'bengaluru': ['bengaluru', 'bangalore', 'bangaluru', 'bengalore'],
+        'mysore': ['mysuru', 'mysore', 'maisuru'],
+        'mysuru': ['mysuru', 'mysore', 'maisuru'],
+        'mumbai': ['bombay', 'mumbai'],
+        'chennai': ['madras', 'chennai'],
+        'kolkata': ['calcutta', 'kolkata'],
+        'thiruvananthapuram': ['trivandrum', 'thiruvananthapuram'],
+        'kochi': ['cochin', 'kochi'],
+        'vadodara': ['baroda', 'vadodara'],
+        'pune': ['poona', 'pune']
+    }
+    
+    for key, variants in city_variations.items():
+        if any(v in name_lower for v in variants):
+            variations.update(variants)
+    
+    return variations
+
+
+def extract_locations_from_text(text: str, states: List[str], district_map: Dict) -> Dict[str, List[str]]:
+    """Extract state and district names from text"""
+    found_states = []
+    found_districts = []
+    
+    text_lower = text.lower()
+    
+    # Find states
+    for state in states:
+        if state.lower() in text_lower:
+            found_states.append(state)
+    
+    # Find districts
+    for dist_key, (dist_val, state_val) in district_map.items():
+        if dist_key in text_lower:
+            if dist_val not in found_districts:
+                found_districts.append(dist_val)
+    
+    return {
+        'states': found_states,
+        'districts': found_districts
+    }
+
+
+# ========== STARTUP EVENT ==========
+
 @app.on_event("startup")
 async def startup_event():
     """Check database connection on startup"""
@@ -68,22 +144,18 @@ async def startup_event():
             logger.warning("⚠ Rasa server not available, using pattern matching")
             USE_RASA = False
 
-# ========== REST OF YOUR EXISTING CODE (keep your functions) ==========
-# Keep: normalize_location_name, get_rasa_prediction, extract_locations_from_text
 
-# ========== ADD AUTH ROUTES ==========
+# ========== AUTH ROUTES ==========
 
 @app.post("/api/register", response_model=UserResponse)
 def register(user: UserCreate, db: Session = Depends(get_db)):
     """Register a new user"""
-    # Check if user exists
     existing_user = db.query(User).filter(
         (User.email == user.email) | (User.username == user.username)
     ).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Email or username already registered")
     
-    # Create user
     hashed_password = auth.get_password_hash(user.password)
     db_user = User(
         email=user.email,
@@ -96,6 +168,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.refresh(db_user)
     return db_user
 
+
 @app.post("/api/login", response_model=Token)
 def login(user: UserLogin, db: Session = Depends(get_db)):
     """Login user and return JWT token"""
@@ -103,7 +176,6 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
     if not db_user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    # Update last login
     db_user.last_login = datetime.utcnow()
     db.commit()
     
@@ -121,10 +193,12 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
         }
     }
 
+
 @app.post("/api/logout")
 def logout():
     """Logout user (client-side token removal)"""
     return {"message": "Logged out successfully"}
+
 
 @app.get("/api/me", response_model=UserResponse)
 def get_me(token: str, db: Session = Depends(get_db)):
@@ -134,11 +208,13 @@ def get_me(token: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid token")
     return user
 
-# ========== MODIFY YOUR CHAT ENDPOINT ==========
+
+# ========== CHAT ENDPOINT ==========
+
 @app.post("/chat", response_model=schemas.ChatResponse)
 async def chat(
     message: schemas.ChatMessage,
-    token: Optional[str] = None,  # ADD THIS
+    token: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     try:
@@ -149,7 +225,6 @@ async def chat(
                 user.query_count += 1
                 db.commit()
         
-        # ========== REST OF YOUR CHAT LOGIC (KEEP AS IS) ==========
         user_message = message.message.strip()
         user_language = message.language
         
@@ -252,7 +327,7 @@ async def chat(
                     logger.info(f"Pattern matched intent: {final_intent}")
                     break
         
-        # Handle intents (KEEP YOUR EXISTING INTENT HANDLING CODE)
+        # Handle intents
         if final_intent == 'greet':
             bot_response = "Hello! I'm your INGRES AI assistant. I can provide groundwater data for any state or district in India. Try: 'Bangalore' or 'Karnataka rainfall'"
             suggestions = ['Karnataka', 'Maharashtra', 'Bangalore', 'Mysore', 'Show all states']
@@ -434,6 +509,8 @@ async def chat(
         logger.error(f"Chat error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ========== OTHER ENDPOINTS ==========
 
 @app.get("/states", response_model=List[str])
 def get_states(db: Session = Depends(get_db)):
