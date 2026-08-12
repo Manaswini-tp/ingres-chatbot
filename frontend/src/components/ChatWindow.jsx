@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import MessageBubble from './MessageBubble';
 import InputBar from './InputBar';
@@ -26,17 +26,8 @@ const ChatWindow = ({ language, selectedState }) => {
     scrollToBottom();
   }, [messages, isTyping]);
 
-  useEffect(() => {
-    if (selectedState && selectedState !== lastStateRef.current) {
-      lastStateRef.current = selectedState;
-      const message = QUICK_QUERIES.includes(selectedState)
-        ? selectedState
-        : `Tell me about ${selectedState}`;
-      sendMessage(message);
-    }
-  }, [selectedState]);
-
-  const sendMessage = async (text) => {
+  // Wrap sendMessage in useCallback to prevent recreation on every render
+  const sendMessage = useCallback(async (text) => {
     if (!text.trim()) return;
 
     const userMessage = {
@@ -73,7 +64,17 @@ const ChatWindow = ({ language, selectedState }) => {
     } finally {
       setIsTyping(false);
     }
-  };
+  }, [language]);
+
+  useEffect(() => {
+    if (selectedState && selectedState !== lastStateRef.current) {
+      lastStateRef.current = selectedState;
+      const message = QUICK_QUERIES.includes(selectedState)
+        ? selectedState
+        : `Tell me about ${selectedState}`;
+      sendMessage(message);
+    }
+  }, [selectedState, sendMessage]);
 
   return (
     <div className="chat-window">
