@@ -1,103 +1,65 @@
-import React, { createContext, useState, useContext, useEffect } from 'react';
-import axios from 'axios';
+import React, { createContext, useContext, useState, useEffect } from 'react';
 
 const AuthContext = createContext();
-
-export const useAuth = () => useContext(AuthContext);
-
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [token, setToken] = useState(localStorage.getItem('token'));
 
   useEffect(() => {
-    // Check if token exists and is valid
-    if (token) {
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      
-      // Verify token with /api/me
-      axios.get(`${API_URL}/api/me`, {
-        params: { token: token }
-      })
-        .then(response => {
-          setUser(response.data);
-        })
-        .catch(() => {
-          logout();
-        })
-        .finally(() => {
-          setLoading(false);
-        });
-    } else {
-      setLoading(false);
+    const stored = localStorage.getItem('ingres-user');
+    if (stored) {
+      try {
+        setUser(JSON.parse(stored));
+      } catch {
+        localStorage.removeItem('ingres-user');
+      }
     }
-  }, [token]);
+    setLoading(false);
+  }, []);
 
-  const login = async (email, password) => {
-    try {
-      const response = await axios.post(`${API_URL}/api/login`, {
-        email,
-        password
-      });
-      
-      const { access_token, user } = response.data;
-      
-      localStorage.setItem('token', access_token);
-      axios.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
-      
-      setToken(access_token);
-      setUser(user);
-      
-      return { success: true };
-    } catch (error) {
-      return { 
-        success: false, 
-        error: error.response?.data?.detail || 'Login failed. Please try again.'
-      };
+  const login = async (email, password, rememberMe) => {
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    if (!email || !password) throw new Error('Please fill in all fields');
+    if (password.length < 6) throw new Error('Invalid credentials');
+
+    const userData = {
+      email,
+      name: email.split('@')[0],
+      avatar: email.charAt(0).toUpperCase(),
+    };
+
+    setUser(userData);
+    if (rememberMe) {
+      localStorage.setItem('ingres-user', JSON.stringify(userData));
+    } else {
+      sessionStorage.setItem('ingres-user', JSON.stringify(userData));
     }
+    return userData;
   };
 
-  const register = async (email, username, password, fullName) => {
-    try {
-      await axios.post(`${API_URL}/api/register`, {
-        email,
-        username,
-        password,
-        full_name: fullName
-      });
-      
-      // Auto-login after registration
-      return await login(email, password);
-    } catch (error) {
-      return { 
-        success: false, 
-        error: error.response?.data?.detail || 'Registration failed. Please try again.'
-      };
-    }
+  const register = async (email, password, name) => {
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    if (!email || !password || !name) throw new Error('Please fill in all fields');
+    if (password.length < 6) throw new Error('Password must be at least 6 characters');
+
+    const userData = { email, name, avatar: name.charAt(0).toUpperCase() };
+    setUser(userData);
+    localStorage.setItem('ingres-user', JSON.stringify(userData));
+    return userData;
   };
 
   const logout = () => {
-    localStorage.removeItem('token');
-    delete axios.defaults.headers.common['Authorization'];
-    setToken(null);
     setUser(null);
-  };
-
-  const value = {
-    user,
-    loading,
-    login,
-    register,
-    logout,
-    isAuthenticated: !!user,
-    token
+    localStorage.removeItem('ingres-user');
+    sessionStorage.removeItem('ingres-user');
   };
 
   return (
-    <AuthContext.Provider value={value}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
       {children}
     </AuthContext.Provider>
   );
 };
+
+export const useAuth = () => useContext(AuthContext);
