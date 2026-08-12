@@ -4,6 +4,7 @@ import MessageBubble from './MessageBubble';
 import InputBar from './InputBar';
 
 const QUICK_QUERIES = ['Show all states', 'Compare Karnataka and Kerala', 'Rainfall in Bangalore'];
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 const ChatWindow = ({ language, selectedState }) => {
   const [messages, setMessages] = useState([
@@ -39,7 +40,7 @@ const ChatWindow = ({ language, selectedState }) => {
     setIsTyping(true);
 
     try {
-      const response = await axios.post('http://localhost:8000/chat', {
+      const response = await axios.post(`${API_URL}/chat`, {
         message: text,
         language,
       });
