@@ -1,5 +1,16 @@
 import React from 'react';
 
+const getValueClass = (type, value) => {
+  if (type === 'extraction') {
+    if (value > 70) return 'critical';
+    if (value > 50) return 'warning';
+    return 'good';
+  }
+  if (type === 'rainfall' && value > 1000) return 'good';
+  if (type === 'recharge' && value > 0) return 'good';
+  return '';
+};
+
 const DataCard = ({ data }) => {
   return (
     <div className="data-card">
@@ -11,13 +22,15 @@ const DataCard = ({ data }) => {
         {data.rainfall !== null && (
           <div className="data-item">
             <span className="data-label">💧 Rainfall</span>
-            <span className="data-value">{data.rainfall} mm</span>
+            <span className={`data-value ${getValueClass('rainfall', data.rainfall)}`}>
+              {data.rainfall} mm
+            </span>
           </div>
         )}
         {data.extraction_stage !== null && (
           <div className="data-item">
             <span className="data-label">📊 Extraction Stage</span>
-            <span className={`data-value ${data.extraction_stage > 70 ? 'critical' : ''}`}>
+            <span className={`data-value ${getValueClass('extraction', data.extraction_stage)}`}>
               {data.extraction_stage}%
             </span>
           </div>
@@ -25,12 +38,14 @@ const DataCard = ({ data }) => {
         {data.gw_recharge !== null && (
           <div className="data-item">
             <span className="data-label">♻️ GW Recharge</span>
-            <span className="data-value">{data.gw_recharge} ham</span>
+            <span className={`data-value ${getValueClass('recharge', data.gw_recharge)}`}>
+              {data.gw_recharge} ham
+            </span>
           </div>
         )}
         {data.net_availability !== null && (
           <div className="data-item">
-            <span className="data-label">💦 Net Availability</span>
+            <span className="data-label">🌊 Net Availability</span>
             <span className="data-value">{data.net_availability} ham</span>
           </div>
         )}
