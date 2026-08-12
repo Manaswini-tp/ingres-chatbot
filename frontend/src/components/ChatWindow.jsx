@@ -1,19 +1,22 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';  // ← Added useCallback
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import MessageBubble from './MessageBubble';
 import InputBar from './InputBar';
+
+const QUICK_QUERIES = ['Show all states', 'Compare Karnataka and Kerala', 'Rainfall in Bangalore'];
 
 const ChatWindow = ({ language, selectedState }) => {
   const [messages, setMessages] = useState([
     {
       type: 'bot',
-      text: 'Hello! I\'m your INGRES AI assistant. Ask me about groundwater data across India! 🌍💧',
-      timestamp: new Date().toLocaleTimeString(),
-      suggestions: ['Karnataka', 'Mysore', 'Show all states', 'Compare Karnataka and Kerala', 'Rainfall in Bangalore']
-    }
+      text: "Hello! I'm your INGRES AI assistant. Ask me about groundwater data across India! 🌍💧",
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      suggestions: ['Karnataka', 'Mysore', 'Show all states', 'Compare Karnataka and Kerala', 'Rainfall in Bangalore'],
+    },
   ]);
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef(null);
+  const lastStateRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -21,28 +24,33 @@ const ChatWindow = ({ language, selectedState }) => {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, isTyping]);
 
-  // Wrap sendMessage in useCallback to prevent it from changing on every render
-  const sendMessage = useCallback(async (text) => {
+  useEffect(() => {
+    if (selectedState && selectedState !== lastStateRef.current) {
+      lastStateRef.current = selectedState;
+      const message = QUICK_QUERIES.includes(selectedState)
+        ? selectedState
+        : `Tell me about ${selectedState}`;
+      sendMessage(message);
+    }
+  }, [selectedState]);
+
+  const sendMessage = async (text) => {
     if (!text.trim()) return;
 
     const userMessage = {
       type: 'user',
       text,
-      timestamp: new Date().toLocaleTimeString()
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
     setMessages(prev => [...prev, userMessage]);
     setIsTyping(true);
 
-    // Get API URL from environment variable (for production) or fallback to localhost
-    //const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-    const API_URL = 'https://ingres-chatbot-pyv6.onrender.com'; //temporarily
-
     try {
-      const response = await axios.post(`${API_URL}/chat`, {
+      const response = await axios.post('http://localhost:8000/chat', {
         message: text,
-        language: language
+        language,
       });
 
       const botMessage = {
@@ -51,56 +59,45 @@ const ChatWindow = ({ language, selectedState }) => {
         data: response.data.data,
         suggestions: response.data.suggestions,
         chartData: response.data.chart_data,
-        timestamp: new Date().toLocaleTimeString()
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
 
       setMessages(prev => [...prev, botMessage]);
-    } catch (error) {
+    } catch {
       const errorMessage = {
         type: 'bot',
         text: 'Sorry, I encountered an error. Please try again. 😔',
-        timestamp: new Date().toLocaleTimeString()
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages(prev => [...prev, errorMessage]);
-      console.error('Chat error:', error);
     } finally {
       setIsTyping(false);
     }
-  }, [language]);  // ← Dependencies for useCallback
-
-  useEffect(() => {
-    if (selectedState) {
-      sendMessage(`Tell me about ${selectedState}`);
-    }
-  }, [selectedState, sendMessage]);  // ← This is now stable
-
-  const handleSuggestionClick = (suggestion) => {
-    sendMessage(suggestion);
   };
 
   return (
     <div className="chat-window">
       <div className="messages-container">
         {messages.map((msg, idx) => (
-          <MessageBubble 
-            key={idx} 
-            message={msg} 
-            onSuggestionClick={handleSuggestionClick}
+          <MessageBubble
+            key={idx}
+            message={msg}
+            onSuggestionClick={sendMessage}
           />
         ))}
         {isTyping && (
           <div className="typing-indicator">
             <div className="typing-dots">
-              <span></span>
-              <span></span>
-              <span></span>
+              <span />
+              <span />
+              <span />
             </div>
             <span className="typing-text">INGRES is thinking...</span>
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
-      <InputBar onSend={sendMessage} language={language} />
+      <InputBar onSend={sendMessage} language={language} disabled={isTyping} />
     </div>
   );
 };
