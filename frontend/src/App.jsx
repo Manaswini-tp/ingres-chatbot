@@ -8,6 +8,8 @@ import ThemeToggle from './components/ThemeToggle';
 import { useAuth } from './context/AuthContext';
 import './App.css';
 
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
 function App() {
   const { user, loading } = useAuth();
   const [language, setLanguage] = useState('en');
@@ -15,8 +17,10 @@ function App() {
   const [selectedState, setSelectedState] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  
+
   useEffect(() => {
-    axios.get('http://localhost:8000/states')
+    axios.get(`${API_URL}/states`)
       .then(response => setStates(response.data))
       .catch(() => {});
   }, []);
