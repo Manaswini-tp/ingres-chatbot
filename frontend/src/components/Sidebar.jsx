@@ -1,17 +1,14 @@
 import React, { useState } from 'react';
-import { FaGlobe, FaChevronDown, FaChevronUp, FaUser, FaSignOutAlt } from 'react-icons/fa';
+import {
+  FaGlobe, FaChevronDown, FaChevronUp, FaSearch,
+  FaChartBar, FaBalanceScale, FaCloudRain, FaSignOutAlt
+} from 'react-icons/fa';
+import { useAuth } from '../context/AuthContext';
 
-const Sidebar = ({ 
-  states, 
-  language, 
-  setLanguage, 
-  onStateSelect,
-  user,
-  isAuthenticated,
-  onLoginClick,
-  onLogout
-}) => {
-  const [showStates, setShowStates] = useState(false);
+const Sidebar = ({ states, language, setLanguage, onStateSelect, isOpen, onClose, selectedState }) => {
+  const { user, logout } = useAuth();
+  const [showStates, setShowStates] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const languages = [
     { code: 'en', name: 'English', flag: '🇬🇧' },
@@ -21,18 +18,59 @@ const Sidebar = ({
     { code: 'ta', name: 'தமிழ்', flag: '🇮🇳' },
     { code: 'mr', name: 'मराठी', flag: '🇮🇳' },
     { code: 'bn', name: 'বাংলা', flag: '🇮🇳' },
-    { code: 'gu', name: 'ગુજરાતી', flag: '🇮🇳' }
+    { code: 'gu', name: 'ગુજરાતી', flag: '🇮🇳' },
   ];
 
+  const filteredStates = states.filter(state =>
+    state.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const quickActions = [
+    { icon: FaChartBar, label: 'Show all states', query: 'Show all states' },
+    { icon: FaBalanceScale, label: 'Compare states', query: 'Compare Karnataka and Kerala' },
+    { icon: FaCloudRain, label: 'Rainfall data', query: 'Rainfall in Bangalore' },
+  ];
+
+  const handleStateClick = (state) => {
+    onStateSelect(state);
+    onClose?.();
+  };
+
+  const handleQuickAction = (query) => {
+    onStateSelect(query);
+    onClose?.();
+  };
+
   return (
-    <div className="sidebar">
+    <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
       <div className="sidebar-header">
-        <h2>🗺️ Navigation</h2>
+        <div className="sidebar-brand">
+          <div className="sidebar-brand-icon">💧</div>
+          <div className="sidebar-brand-text">
+            <h2>INGRES AI</h2>
+            <span>Groundwater System</span>
+          </div>
+        </div>
       </div>
-      
+
+      {user && (
+        <div className="sidebar-profile">
+          <div className="sidebar-avatar">{user.avatar}</div>
+          <div className="sidebar-profile-info">
+            <div className="sidebar-profile-name">{user.name}</div>
+            <div className="sidebar-profile-email">{user.email}</div>
+          </div>
+          <button className="sidebar-logout" onClick={logout} title="Sign out">
+            <FaSignOutAlt />
+          </button>
+        </div>
+      )}
+
       <div className="sidebar-section">
-        <h3><FaGlobe /> Language</h3>
-        <select 
+        <div className="sidebar-section-title">
+          <FaGlobe /> Language
+        </div>
+        <select
           className="language-select"
           value={language}
           onChange={(e) => setLanguage(e.target.value)}
@@ -46,113 +84,68 @@ const Sidebar = ({
       </div>
 
       <div className="sidebar-section">
-        <div 
+        <div
           className="section-header"
           onClick={() => setShowStates(!showStates)}
         >
           <h3>📍 States ({states.length})</h3>
           {showStates ? <FaChevronUp /> : <FaChevronDown />}
         </div>
-        
+
         {showStates && (
-          <div className="states-list">
-            {states.map(state => (
-              <button
-                key={state}
-                className="state-item"
-                onClick={() => onStateSelect(state)}
-              >
-                {state}
-              </button>
-            ))}
-          </div>
+          <>
+            <div className="states-search-wrapper">
+              <FaSearch className="states-search-icon" />
+              <input
+                type="text"
+                className="states-search"
+                placeholder="Search states..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+            <div className="states-list">
+              {filteredStates.map(state => (
+                <button
+                  key={state}
+                  className={`state-item ${selectedState === state ? 'active' : ''}`}
+                  onClick={() => handleStateClick(state)}
+                >
+                  {state}
+                </button>
+              ))}
+              {filteredStates.length === 0 && (
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', padding: '8px 12px' }}>
+                  No states found
+                </p>
+              )}
+            </div>
+          </>
         )}
       </div>
 
-      {/* ========== ADD AUTH SECTION ========== */}
-      <div style={{ marginTop: 'auto', borderTop: '1px solid #e5e7eb' }}>
-        {isAuthenticated ? (
-          <div style={{ padding: '16px' }}>
-            <div style={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              justifyContent: 'space-between',
-              gap: '12px'
-            }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ 
-                  fontWeight: '600', 
-                  fontSize: '14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px'
-                }}>
-                  <FaUser style={{ color: '#667eea' }} />
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {user?.full_name || user?.username}
-                  </span>
-                </div>
-                <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                  {user?.query_count || 0} queries
-                </div>
-              </div>
-              <button 
-                onClick={onLogout}
-                style={{
-                  padding: '6px 14px',
-                  background: '#ef4444',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '6px',
-                  cursor: 'pointer',
-                  fontSize: '13px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  whiteSpace: 'nowrap'
-                }}
-              >
-                <FaSignOutAlt size={12} /> Logout
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div style={{ padding: '16px' }}>
-            <button 
-              onClick={onLoginClick}
-              style={{
-                width: '100%',
-                padding: '10px',
-                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                color: 'white',
-                border: 'none',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                fontSize: '14px',
-                fontWeight: '600',
-                transition: 'transform 0.2s, box-shadow 0.2s'
-              }}
-              onMouseEnter={(e) => {
-                e.target.style.transform = 'scale(1.02)';
-                e.target.style.boxShadow = '0 4px 15px rgba(102, 126, 234, 0.4)';
-              }}
-              onMouseLeave={(e) => {
-                e.target.style.transform = 'scale(1)';
-                e.target.style.boxShadow = 'none';
-              }}
+      <div className="sidebar-section">
+        <div className="sidebar-section-title">Quick Actions</div>
+        <div className="quick-actions">
+          {quickActions.map(({ icon: Icon, label, query }) => (
+            <button
+              key={label}
+              className="quick-action-btn"
+              onClick={() => handleQuickAction(query)}
             >
-              🔐 Sign In / Register
+              <Icon /> {label}
             </button>
-          </div>
-        )}
+          ))}
+        </div>
       </div>
 
       <div className="sidebar-footer">
-        <p>💧Unlocking groundwater data, one question at a time</p>
-        <p className="version">v3.0</p>
+        <p>💧 Powered by AI</p>
+        <p className="version">v2.0</p>
       </div>
-    </div>
+    </aside>
   );
 };
 
 export default Sidebar;
+
